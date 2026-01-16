@@ -1,0 +1,1 @@
+"""Auto-Schematic core package."""
