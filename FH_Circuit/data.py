@@ -6,12 +6,12 @@ import dataclasses
 import math
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from FH_Circuit.config import IMAGE_SIZE, SYMBOLS
+from FH_Circuit.config import IMAGE_SIZE
 
 
 @dataclasses.dataclass
@@ -133,42 +133,32 @@ def synthesize_sample(symbol: str, size: int = IMAGE_SIZE) -> np.ndarray:
     return arr
 
 
-def build_dataset(count_per_class: int, size: int = IMAGE_SIZE) -> List[Sample]:
+def load_training_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> Tuple[List[Sample], List[str]]:
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
+
     samples: List[Sample] = []
-    for symbol in SYMBOLS:
-        for _ in range(count_per_class):
-            samples.append(Sample(image=synthesize_sample(symbol, size=size), label=symbol))
-    random.shuffle(samples)
-    return samples
+    labels: List[str] = []
+    image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
-
-def _normalize_label(raw_label: str, aliases: Dict[str, str]) -> str:
-    label = raw_label.strip().lower().replace(" ", "_")
-    return aliases.get(label, label)
-
-
-def load_kaggle_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> List[Sample]:
-    aliases = {
-        "voltage_source": "source",
-        "vsource": "source",
-        "ground": "ground",
-        "gnd": "ground",
-    }
-    samples: List[Sample] = []
-    for class_dir in dataset_dir.iterdir():
+    for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
         if not class_dir.is_dir():
             continue
-        normalized = _normalize_label(class_dir.name, aliases)
-        if normalized not in SYMBOLS:
+        label = class_dir.name.strip()
+        if not label:
             continue
-        for image_path in class_dir.glob("*.png"):
+        labels.append(label)
+        for image_path in class_dir.iterdir():
+            if image_path.suffix.lower() not in image_extensions:
+                continue
             image = Image.open(image_path).convert("L")
             image = image.resize((size, size), resample=Image.BILINEAR)
-            samples.append(Sample(image=np.array(image), label=normalized))
+            samples.append(Sample(image=np.array(image), label=label))
+
     if not samples:
         raise ValueError("No samples found. Check dataset directory structure and labels.")
     random.shuffle(samples)
-    return samples
+    return samples, labels
 
 
 def save_samples(samples: List[Sample], output_dir: Path) -> None:

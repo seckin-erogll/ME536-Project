@@ -17,7 +17,6 @@ from torch.utils.data import DataLoader
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from FH_Circuit.config import SYMBOLS
 from FH_Circuit.data import Sample
 from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.model import ConvAutoencoder
@@ -46,10 +45,10 @@ def train_autoencoder(
     return model
 
 
-def fit_pca_kmeans(latents: np.ndarray) -> Tuple[PCA, KMeans]:
+def fit_pca_kmeans(latents: np.ndarray, labels: List[str]) -> Tuple[PCA, KMeans]:
     pca = PCA(n_components=2)
     reduced = pca.fit_transform(latents)
-    kmeans = KMeans(n_clusters=len(SYMBOLS), random_state=42, n_init=10)
+    kmeans = KMeans(n_clusters=len(labels), random_state=42, n_init=10)
     kmeans.fit(reduced)
     return pca, kmeans
 
@@ -72,9 +71,13 @@ def save_artifacts(
     pca: PCA,
     kmeans: KMeans,
     latent_dim: int,
+    labels: List[str],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "latent_dim": latent_dim}, output_dir / "autoencoder.pt")
+    torch.save(
+        {"state_dict": model.state_dict(), "latent_dim": latent_dim, "labels": labels},
+        output_dir / "autoencoder.pt",
+    )
     with (output_dir / "pca.pkl").open("wb") as file:
         pickle.dump(pca, file)
     with (output_dir / "kmeans.pkl").open("wb") as file:
@@ -83,13 +86,14 @@ def save_artifacts(
 
 def train_pipeline(
     samples: List[Sample],
+    labels: List[str],
     output_dir: Path,
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
 ) -> None:
-    dataset = SymbolDataset(samples)
+    dataset = SymbolDataset(samples, labels)
     model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
     latents, _ = extract_latents(model, dataset)
-    pca, kmeans = fit_pca_kmeans(latents)
-    save_artifacts(output_dir, model, pca, kmeans, latent_dim)
+    pca, kmeans = fit_pca_kmeans(latents, labels)
+    save_artifacts(output_dir, model, pca, kmeans, latent_dim, labels)

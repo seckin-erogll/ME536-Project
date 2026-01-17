@@ -4,61 +4,60 @@ Auto-Schematic converts rough, hand-drawn circuit sketches into clean CAD-like s
 
 ## Dataset Used
 
-Training uses the **Handdrawn Circuit Schematic Components** dataset from Kaggle:
-<https://www.kaggle.com/datasets/moodrammer/handdrawn-circuit-schematic-components>. Download it manually from Kaggle and point `--dataset-dir` to the extracted folder. The code also includes a synthetic generator for quick prototyping, but the Kaggle dataset is the expected source for real hand-drawn inputs.
-
-Supported classes:
-
-- Resistor
-- Capacitor
-- Inductor
-- Source
-- Ground
+Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component class is defined by its folder name (for example, `resistor`, `cap`, `inductor`). Place your downloaded dataset inside this folder and keep the per-class subfolders.
 
 ## Project Structure
 
-- `FH_Circuit/config.py`: shared constants and thresholds.
-- `FH_Circuit/data.py`: symbol rendering + synthetic data generation.
+**Training pipeline files**
+- `FH_Circuit/data.py`: training data loader (reads labels from folder names).
 - `FH_Circuit/preprocess.py`: thresholding, skeletonization, dilation.
 - `FH_Circuit/model.py`: convolutional autoencoder.
-- `FH_Circuit/train.py`: training + PCA/k-means artifacts.
-- `FH_Circuit/classify.py`: inference logic.
+- `FH_Circuit/train.py`: training loop + PCA/k-means artifacts.
+- `FH_Circuit/dataset.py`: PyTorch dataset wrapper used by training.
+
+**Inference/GUI files**
+- `FH_Circuit/classify.py`: inference logic (loads artifacts + predicts labels).
 - `FH_Circuit/gui.py`: drawing GUI for sketch recognition.
+
+**Shared dependencies**
+- `FH_Circuit/config.py`: shared constants and thresholds.
 - `main.py`: CLI entrypoint.
 
 ## Quick Start
 
-Generate synthetic samples (optional):
+### 1) Install dependencies
 
 ```bash
-python main.py generate --samples 200 --output ./synthetic
+pip install numpy Pillow scikit-image scikit-learn torch
 ```
 
-Train the autoencoder and save artifacts with the Kaggle dataset:
+### 2) Verify training data layout
+
+Your dataset should live in `FH_Circuit/Training_Data` with one folder per class label:
+
+```
+FH_Circuit/Training_Data/
+  resistor/
+  cap/
+  inductor/
+  ...
+```
+
+The folder name becomes the label used during training and inference.
+
+### 3) Train the model
 
 ```bash
-python main.py train --dataset-dir /path/to/handdrawn-circuit-schematic-components --epochs 5 --output ./artifacts
+python main.py train --dataset-dir FH_Circuit/Training_Data --epochs 5 --output ./artifacts
 ```
 
-If you run training from inside the package directory, use module mode:
-
-```bash
-python -m FH_Circuit.train
-```
-
-Train with synthetic data (optional demo):
-
-```bash
-python main.py train --use-synthetic --samples 200 --epochs 5 --output ./artifacts
-```
-
-Launch the GUI (draw symbols and classify):
+### 4) Run the GUI
 
 ```bash
 python main.py gui --model-dir ./artifacts
 ```
 
-Classify a saved image:
+### 5) Classify a saved image
 
 ```bash
 python main.py classify path/to/sketch.png --model-dir ./artifacts
@@ -66,4 +65,5 @@ python main.py classify path/to/sketch.png --model-dir ./artifacts
 
 ## Dependencies
 
-- `numpy`, `Pillow`, `scikit-image`, `scikit-learn`, `torch`, `tkinter`
+- Training: `numpy`, `Pillow`, `scikit-image`, `scikit-learn`, `torch`
+- GUI: `tkinter` (bundled with most Python distributions)
