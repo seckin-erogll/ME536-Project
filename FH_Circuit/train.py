@@ -71,18 +71,23 @@ def train_autoencoder(
     return model
 
 
-def fit_pca_classifier(latents: np.ndarray, labels: List[str], components: int) -> Tuple[PCA, KNeighborsClassifier]:
+def fit_pca_classifier(
+    latents: np.ndarray,
+    sample_labels: List[int],
+    components: int,
+) -> Tuple[PCA, KNeighborsClassifier]:
     pca = PCA(n_components=components)
     reduced = pca.fit_transform(latents)
-    classifier = KNeighborsClassifier(n_neighbors=min(3, len(labels)))
-    classifier.fit(reduced, labels)
+    unique_labels = sorted(set(sample_labels))
+    classifier = KNeighborsClassifier(n_neighbors=min(3, len(unique_labels)))
+    classifier.fit(reduced, sample_labels)
     return pca, classifier
 
 
 def extract_latents(model, dataset):
     model.eval()
     latents = []
-    labels = []
+    sample_labels = []
 
     device = next(model.parameters()).device
 
@@ -91,9 +96,9 @@ def extract_latents(model, dataset):
             image = image.to(device)
             _, latent = model(image.unsqueeze(0))
             latents.append(latent.detach().cpu())
-            labels.append(label)
+            sample_labels.append(int(label))
 
-    return torch.cat(latents, dim=0), labels
+    return torch.cat(latents, dim=0), sample_labels
 
 
 
@@ -126,7 +131,7 @@ def train_pipeline(
 ) -> None:
     dataset = SymbolDataset(samples, labels)
     model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
-    latents, _ = extract_latents(model, dataset)
+    latents, sample_labels = extract_latents(model, dataset)
     components = min(latent_dim, 16)
-    pca, classifier = fit_pca_classifier(latents, labels, components)
+    pca, classifier = fit_pca_classifier(latents, sample_labels, components)
     save_artifacts(output_dir, model, pca, classifier, latent_dim, labels)

@@ -47,9 +47,9 @@ def classify_sketch(
         return "Novelty detected: unknown component."
     reduced = pca.transform(latent.cpu().numpy())
     distances, indices = classifier.kneighbors(reduced, n_neighbors=min(3, len(labels)))
-    predicted = classifier.predict(reduced)[0]
+    predicted_index = int(classifier.predict(reduced)[0])
     if distances.shape[1] > 1 and (distances[0, 1] - distances[0, 0]) < ambiguity_threshold:
         return "Ambiguity detected: ask user to clarify between closest symbols."
-    if predicted not in labels:
+    if predicted_index < 0 or predicted_index >= len(labels):
         return "Model output out of range. Check training labels."
-    return f"Detected: {predicted}"
+    return f"Detected: {labels[predicted_index]}"
