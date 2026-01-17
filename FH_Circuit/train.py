@@ -42,10 +42,11 @@ def train_autoencoder(
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
-    log_interval: int = 50,
+    log_interval: int = 0,
 ) -> ConvAutoencoder:
     device = resolve_device()
     print(f"Training on device: {describe_device(device)}")
+    print(f"Dataset size: {len(dataset)} | Batch size: {batch_size} | Latent dim: {latent_dim}")
     model = ConvAutoencoder(latent_dim=latent_dim).to(device)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -62,6 +63,14 @@ def train_autoencoder(
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
+            if epoch == 1 and step == 1:
+                print(
+                    "Debug first batch:",
+                    f"inputs={tuple(inputs.shape)}",
+                    f"min={inputs.min().item():.3f}",
+                    f"max={inputs.max().item():.3f}",
+                    f"loss={loss.item():.6f}",
+                )
             if log_interval and step % log_interval == 0:
                 avg_loss = running_loss / step
                 print(f"Epoch {epoch}/{epochs} | Step {step}/{len(loader)} | Loss {avg_loss:.6f}")
