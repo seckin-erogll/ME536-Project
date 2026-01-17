@@ -10,8 +10,8 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
-from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+from sklearn.neighbors import KNeighborsClassifier
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -71,12 +71,12 @@ def train_autoencoder(
     return model
 
 
-def fit_pca_kmeans(latents: np.ndarray, labels: List[str]) -> Tuple[PCA, KMeans]:
-    pca = PCA(n_components=2)
+def fit_pca_classifier(latents: np.ndarray, labels: List[str], components: int) -> Tuple[PCA, KNeighborsClassifier]:
+    pca = PCA(n_components=components)
     reduced = pca.fit_transform(latents)
-    kmeans = KMeans(n_clusters=len(labels), random_state=42, n_init=10)
-    kmeans.fit(reduced)
-    return pca, kmeans
+    classifier = KNeighborsClassifier(n_neighbors=min(3, len(labels)))
+    classifier.fit(reduced, labels)
+    return pca, classifier
 
 
 def extract_latents(model, dataset):
@@ -101,7 +101,7 @@ def save_artifacts(
     output_dir: Path,
     model: ConvAutoencoder,
     pca: PCA,
-    kmeans: KMeans,
+    classifier: KNeighborsClassifier,
     latent_dim: int,
     labels: List[str],
 ) -> None:
@@ -112,8 +112,8 @@ def save_artifacts(
     )
     with (output_dir / "pca.pkl").open("wb") as file:
         pickle.dump(pca, file)
-    with (output_dir / "kmeans.pkl").open("wb") as file:
-        pickle.dump(kmeans, file)
+    with (output_dir / "classifier.pkl").open("wb") as file:
+        pickle.dump(classifier, file)
 
 
 def train_pipeline(
@@ -127,6 +127,6 @@ def train_pipeline(
     dataset = SymbolDataset(samples, labels)
     model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
     latents, _ = extract_latents(model, dataset)
-    pca, kmeans = fit_pca_kmeans(latents, labels)
-    save_artifacts(output_dir, model, pca, kmeans, latent_dim, labels)
-
+    components = min(latent_dim, 16)
+    pca, classifier = fit_pca_classifier(latents, labels, components)
+    save_artifacts(output_dir, model, pca, classifier, latent_dim, labels)

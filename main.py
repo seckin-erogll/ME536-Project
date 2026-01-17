@@ -95,11 +95,11 @@ def run_classify(args: argparse.Namespace) -> None:
         args.model_dir = _prompt_path("Model directory", args.model_dir)
     if args.image is None:
         raise ValueError("Image path is required for classification.")
-    model, pca, kmeans, labels = load_artifacts(args.model_dir)
+    model, pca, classifier, labels = load_artifacts(args.model_dir)
     image = Image.open(args.image).convert("L")
     image = image.resize((64, 64), resample=Image.BILINEAR)
     sketch = np.array(image)
-    result = classify_sketch(model, pca, kmeans, sketch, labels)
+    result = classify_sketch(model, pca, classifier, sketch, labels)
     print(result)
 
 

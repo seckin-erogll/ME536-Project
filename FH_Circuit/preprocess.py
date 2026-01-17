@@ -13,6 +13,6 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
     binary = (image > thresh).astype(np.uint8)
     if binary.sum() < min_area:
         raise ValueError("Noise detected: sketch too small.")
-    skeleton = morphology.skeletonize(binary)
-    dilated = morphology.dilation(skeleton, morphology.square(3))
+    footprint = morphology.footprint_rectangle((3, 3))
+    dilated = morphology.binary_dilation(binary, footprint)
     return dilated.astype(np.float32)
