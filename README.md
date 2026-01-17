@@ -5,7 +5,7 @@ Auto-Schematic converts rough, hand-drawn circuit sketches into clean CAD-like s
 ## Dataset Used
 
 Training uses the **Handdrawn Circuit Schematic Components** dataset from Kaggle:
-<https://www.kaggle.com/datasets/moodrammer/handdrawn-circuit-schematic-components>. The code also includes a synthetic generator for quick prototyping, but the Kaggle dataset is the expected source for real hand-drawn inputs.
+<https://www.kaggle.com/datasets/moodrammer/handdrawn-circuit-schematic-components>. Download it manually from Kaggle and point `--dataset-dir` to the extracted folder. The code also includes a synthetic generator for quick prototyping, but the Kaggle dataset is the expected source for real hand-drawn inputs.
 
 Supported classes:
 
@@ -38,6 +38,12 @@ Train the autoencoder and save artifacts with the Kaggle dataset:
 
 ```bash
 python main.py train --dataset-dir /path/to/handdrawn-circuit-schematic-components --epochs 5 --output ./artifacts
+```
+
+If you run training from inside the package directory, use module mode:
+
+```bash
+python -m FH_Circuit.train
 ```
 
 Train with synthetic data (optional demo):

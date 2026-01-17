@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pickle
+import sys
 from pathlib import Path
 from typing import List, Tuple
 
@@ -12,6 +13,9 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from torch import nn
 from torch.utils.data import DataLoader
+
+if __package__ is None:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from FH_Circuit.config import SYMBOLS
 from FH_Circuit.data import Sample
