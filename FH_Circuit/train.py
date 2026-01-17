@@ -53,16 +53,22 @@ def fit_pca_kmeans(latents: np.ndarray, labels: List[str]) -> Tuple[PCA, KMeans]
     return pca, kmeans
 
 
-def extract_latents(model: ConvAutoencoder, dataset: SymbolDataset) -> Tuple[np.ndarray, List[int]]:
+def extract_latents(model, dataset):
+    model.eval()
     latents = []
     labels = []
-    model.eval()
+
+    device = next(model.parameters()).device  # <-- bunu loop dışında almak daha iyi
+
     with torch.no_grad():
         for image, label in dataset:
+            image = image.to(device)          # <-- ASIL EKLEYECEĞİN SATIR
             _, latent = model(image.unsqueeze(0))
-            latents.append(latent.squeeze(0).numpy())
+            latents.append(latent.detach().cpu())  # <-- numpy vs için güvenli
             labels.append(label)
-    return np.array(latents), labels
+
+    return torch.cat(latents, dim=0), labels
+
 
 
 def save_artifacts(
@@ -96,4 +102,39 @@ def train_pipeline(
     model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
     latents, _ = extract_latents(model, dataset)
     pca, kmeans = fit_pca_kmeans(latents, labels)
+    import time
+
+    # train_pipeline içinde, epoch loop'tan önce:
+    log_interval = 50  # her 50 batch'te bir yazdır (istersen 10 yap)
+    device = next(model.parameters()).device
+
+    for epoch in range(1, epochs + 1):
+        t0 = time.perf_counter()
+        model.train()
+        running = 0.0
+
+        for step, batch in enumerate(loader, start=1):
+            # batch bazen (image, label) gelir
+            image = batch[0] if isinstance(batch, (tuple, list)) else batch
+            image = image.to(device)
+
+            recon, latent = model(image)              # senin forward'una göre
+            loss = loss_fn(recon, image)
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+
+            running += float(loss.item())
+
+            if step % log_interval == 0:
+                avg = running / step
+                print(f"epoch {epoch:03d}/{epochs} | step {step:04d}/{len(loader)} | loss {avg:.6f}")
+
+        avg_epoch = running / max(1, len(loader))
+        dt = time.perf_counter() - t0
+        print(f"epoch {epoch:03d} done | avg_loss {avg_epoch:.6f} | {dt:.1f}s")
+
     save_artifacts(output_dir, model, pca, kmeans, latent_dim, labels)
+
+
