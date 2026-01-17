@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pickle
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple
 
@@ -22,26 +23,51 @@ from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.model import ConvAutoencoder
 
 
+def resolve_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def describe_device(device: torch.device) -> str:
+    if device.type == "cuda":
+        return f"cuda ({torch.cuda.get_device_name(device)})"
+    return device.type
+
+
 def train_autoencoder(
     dataset: SymbolDataset,
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
+    log_interval: int = 50,
 ) -> ConvAutoencoder:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device()
+    print(f"Training on device: {describe_device(device)}")
     model = ConvAutoencoder(latent_dim=latent_dim).to(device)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.MSELoss()
-    model.train()
-    for _ in range(epochs):
-        for inputs, _ in loader:
+    for epoch in range(1, epochs + 1):
+        model.train()
+        running_loss = 0.0
+        start = time.perf_counter()
+        for step, (inputs, _) in enumerate(loader, start=1):
             inputs = inputs.to(device)
             recon, _ = model(inputs)
             loss = criterion(recon, inputs)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            running_loss += loss.item()
+            if log_interval and step % log_interval == 0:
+                avg_loss = running_loss / step
+                print(f"Epoch {epoch}/{epochs} | Step {step}/{len(loader)} | Loss {avg_loss:.6f}")
+        avg_epoch_loss = running_loss / max(1, len(loader))
+        duration = time.perf_counter() - start
+        print(f"Epoch {epoch}/{epochs} complete | Avg Loss {avg_epoch_loss:.6f} | {duration:.1f}s")
     return model
 
 
@@ -58,13 +84,13 @@ def extract_latents(model, dataset):
     latents = []
     labels = []
 
-    device = next(model.parameters()).device  # <-- bunu loop dışında almak daha iyi
+    device = next(model.parameters()).device
 
     with torch.no_grad():
         for image, label in dataset:
-            image = image.to(device)          # <-- ASIL EKLEYECEĞİN SATIR
+            image = image.to(device)
             _, latent = model(image.unsqueeze(0))
-            latents.append(latent.detach().cpu())  # <-- numpy vs için güvenli
+            latents.append(latent.detach().cpu())
             labels.append(label)
 
     return torch.cat(latents, dim=0), labels
@@ -102,39 +128,5 @@ def train_pipeline(
     model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
     latents, _ = extract_latents(model, dataset)
     pca, kmeans = fit_pca_kmeans(latents, labels)
-    import time
-
-    # train_pipeline içinde, epoch loop'tan önce:
-    log_interval = 50  # her 50 batch'te bir yazdır (istersen 10 yap)
-    device = next(model.parameters()).device
-
-    for epoch in range(1, epochs + 1):
-        t0 = time.perf_counter()
-        model.train()
-        running = 0.0
-
-        for step, batch in enumerate(loader, start=1):
-            # batch bazen (image, label) gelir
-            image = batch[0] if isinstance(batch, (tuple, list)) else batch
-            image = image.to(device)
-
-            recon, latent = model(image)              # senin forward'una göre
-            loss = loss_fn(recon, image)
-
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-
-            running += float(loss.item())
-
-            if step % log_interval == 0:
-                avg = running / step
-                print(f"epoch {epoch:03d}/{epochs} | step {step:04d}/{len(loader)} | loss {avg:.6f}")
-
-        avg_epoch = running / max(1, len(loader))
-        dt = time.perf_counter() - t0
-        print(f"epoch {epoch:03d} done | avg_loss {avg_epoch:.6f} | {dt:.1f}s")
-
     save_artifacts(output_dir, model, pca, kmeans, latent_dim, labels)
-
 
