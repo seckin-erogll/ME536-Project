@@ -10,6 +10,7 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
+from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
 from torch import nn
@@ -21,6 +22,7 @@ if __package__ is None:
 from FH_Circuit.data import Sample
 from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.model import ConvAutoencoder
+from FH_Circuit.preprocess import preprocess
 
 
 def resolve_device() -> torch.device:
@@ -110,6 +112,31 @@ def extract_latents(model, dataset):
     return torch.cat(latents, dim=0), sample_labels
 
 
+def save_reconstructions(
+    model: ConvAutoencoder,
+    samples: List[Sample],
+    output_dir: Path,
+) -> None:
+    recon_dir = output_dir / "reconstructions"
+    recon_dir.mkdir(parents=True, exist_ok=True)
+    device = next(model.parameters()).device
+    model.eval()
+    label_counts: dict[str, int] = {}
+    with torch.no_grad():
+        for sample in samples:
+            label = sample.label
+            label_counts[label] = label_counts.get(label, 0) + 1
+            label_dir = recon_dir / label
+            label_dir.mkdir(parents=True, exist_ok=True)
+            processed = preprocess(sample.image)
+            tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float().to(device)
+            recon, _ = model(tensor)
+            recon_np = recon.squeeze(0).squeeze(0).cpu().numpy()
+            recon_img = (np.clip(recon_np, 0, 1) * 255).astype(np.uint8)
+            Image.fromarray(sample.image).save(label_dir / f"{label_counts[label]:04d}_input.png")
+            Image.fromarray(recon_img).save(label_dir / f"{label_counts[label]:04d}_recon.png")
+
+
 
 def save_artifacts(
     output_dir: Path,
@@ -144,3 +171,5 @@ def train_pipeline(
     components = min(latent_dim, 16)
     pca, classifier = fit_pca_classifier(latents, sample_labels, components)
     save_artifacts(output_dir, model, pca, classifier, latent_dim, labels)
+    print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
+    save_reconstructions(model, samples, output_dir)
