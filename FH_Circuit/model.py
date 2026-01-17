@@ -19,12 +19,12 @@ class ConvAutoencoder(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, latent_dim),
+            nn.Linear(64 * 15 * 15, latent_dim),
         )
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 64 * 8 * 8),
+            nn.Linear(latent_dim, 64 * 15 * 15),
             nn.ReLU(),
-            nn.Unflatten(1, (64, 8, 8)),
+            nn.Unflatten(1, (64, 15, 15)),
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),

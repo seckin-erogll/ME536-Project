@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.config import IMAGE_SIZE
 from FH_Circuit.data import load_training_dataset
 from FH_Circuit.gui import launch_gui
 from FH_Circuit.train import train_pipeline
@@ -97,7 +98,7 @@ def run_classify(args: argparse.Namespace) -> None:
         raise ValueError("Image path is required for classification.")
     model, pca, classifier, labels = load_artifacts(args.model_dir)
     image = Image.open(args.image).convert("L")
-    image = image.resize((64, 64), resample=Image.BILINEAR)
+    image = image.resize((IMAGE_SIZE, IMAGE_SIZE), resample=Image.BILINEAR)
     sketch = np.array(image)
     result = classify_sketch(model, pca, classifier, sketch, labels)
     print(result)

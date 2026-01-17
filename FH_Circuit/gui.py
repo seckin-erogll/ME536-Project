@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.config import IMAGE_SIZE
 
 
 class SketchGUI:
@@ -73,7 +74,7 @@ class SketchGUI:
         self.status.set("Canvas cleared.")
 
     def on_classify(self) -> None:
-        resized = self.image.resize((64, 64), resample=Image.BILINEAR)
+        resized = self.image.resize((IMAGE_SIZE, IMAGE_SIZE), resample=Image.BILINEAR)
         sketch = np.array(resized)
         try:
             result = classify_sketch(self.model, self.pca, self.classifier, sketch, self.labels)
