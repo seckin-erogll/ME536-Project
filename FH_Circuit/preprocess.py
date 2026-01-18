@@ -108,7 +108,7 @@ def _otsu_threshold(image: np.ndarray) -> float:
 def _morphology_cleanup(binary: np.ndarray) -> np.ndarray:
     if _SKIMAGE_AVAILABLE:
         selem = morphology.footprint_rectangle((3, 3))
-        opened = morphology.opening(binary, selem)
+        opened = morphology.opening(binary.astype(bool), selem)
         closed = morphology.closing(opened, selem)
         cleaned = morphology.remove_small_objects(closed, max_size=5)
         return cleaned.astype(np.uint8)
