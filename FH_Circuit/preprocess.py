@@ -23,6 +23,9 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
         fallback = (image < otsu_thresh).astype(np.uint8)
         fallback_opened = morphology.opening(fallback, footprint=footprint)
         dilated = morphology.dilation(fallback_opened, footprint=footprint)
+    if dilated.sum() < min_area:
+        normalized = _normalize_to_canvas(dilated)
+        return normalized.astype(np.float32)
     normalized = _normalize_to_canvas(dilated)
     return normalized.astype(np.float32)
 
