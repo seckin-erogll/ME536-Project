@@ -15,11 +15,14 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
     image = image.astype(np.float32)
     local_thresh = filters.threshold_local(image, block_size=31, offset=21)
     binary = (image < local_thresh).astype(np.uint8)
-    footprint = morphology.square(3)
+    footprint = morphology.footprint_rectangle((3, 3))
     opened = morphology.opening(binary, footprint=footprint)
     dilated = morphology.dilation(opened, footprint=footprint)
     if dilated.sum() < min_area:
-        raise ValueError("Noise detected: sketch too small.")
+        otsu_thresh = filters.threshold_otsu(image)
+        fallback = (image < otsu_thresh).astype(np.uint8)
+        fallback_opened = morphology.opening(fallback, footprint=footprint)
+        dilated = morphology.dilation(fallback_opened, footprint=footprint)
     normalized = _normalize_to_canvas(dilated)
     return normalized.astype(np.float32)
 
