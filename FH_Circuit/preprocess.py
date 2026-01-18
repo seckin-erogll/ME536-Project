@@ -107,10 +107,10 @@ def _otsu_threshold(image: np.ndarray) -> float:
 
 def _morphology_cleanup(binary: np.ndarray) -> np.ndarray:
     if _SKIMAGE_AVAILABLE:
-        selem = morphology.square(3)
-        opened = morphology.binary_opening(binary, selem)
-        closed = morphology.binary_closing(opened, selem)
-        cleaned = morphology.remove_small_objects(closed, min_size=5)
+        selem = morphology.footprint_rectangle((3, 3))
+        opened = morphology.opening(binary, selem)
+        closed = morphology.closing(opened, selem)
+        cleaned = morphology.remove_small_objects(closed, max_size=5)
         return cleaned.astype(np.uint8)
     opened = _binary_opening(binary)
     closed = _binary_closing(opened)
@@ -147,7 +147,7 @@ def _binary_dilation(binary: np.ndarray) -> np.ndarray:
 
 def _keep_largest_component(binary: np.ndarray, min_area: int) -> np.ndarray:
     if binary.sum() < min_area:
-        raise ValueError("Noise detected: sketch too small after preprocessing.")
+        return binary
     if _SKIMAGE_AVAILABLE:
         labeled = measure.label(binary, connectivity=2)
         if labeled.max() == 0:
