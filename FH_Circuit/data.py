@@ -133,17 +133,19 @@ def synthesize_sample(symbol: str, size: int = IMAGE_SIZE) -> np.ndarray:
     return arr
 
 
-def load_training_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> Tuple[List[Sample], List[str]]:
+def load_training_dataset(dataset_dir: Path) -> Tuple[List[Sample], List[str]]:
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
     samples: List[Sample] = []
     labels: List[str] = []
     image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    has_label_dir = False
 
     for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
         if not class_dir.is_dir():
             continue
+        has_label_dir = True
         label = class_dir.name.strip()
         if not label:
             continue
@@ -152,9 +154,10 @@ def load_training_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> Tuple[Li
             if image_path.suffix.lower() not in image_extensions:
                 continue
             image = Image.open(image_path).convert("L")
-            image = image.resize((size, size), resample=Image.BILINEAR)
             samples.append(Sample(image=np.array(image), label=label))
 
+    if not has_label_dir:
+        raise ValueError("Dataset directory has no class subfolders. Add label folders with images.")
     if not samples:
         raise ValueError("No samples found. Check dataset directory structure and labels.")
     random.shuffle(samples)

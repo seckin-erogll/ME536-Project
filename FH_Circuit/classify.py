@@ -1,55 +1,81 @@
-"""Classification utilities for Auto-Schematic."""
+"""Prediction utilities for supervised circuit symbol classifier."""
 
 from __future__ import annotations
 
-import pickle
+import json
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-from sklearn.decomposition import PCA
-from sklearn.neighbors import KNeighborsClassifier
 
-from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
-from FH_Circuit.model import ConvAutoencoder
-from FH_Circuit.preprocess import preprocess
+from FH_Circuit.config import GRAPH_EMBEDDING_DIM, IMAGE_EMBEDDING_DIM
+from FH_Circuit.graph_extract import extract_graph
+from FH_Circuit.model import HybridClassifier
+from FH_Circuit.preprocess import preprocess_image
 
 
-def load_artifacts(model_dir: Path) -> Tuple[ConvAutoencoder, PCA, KNeighborsClassifier, List[str]]:
-    checkpoint = torch.load(model_dir / "autoencoder.pt", map_location="cpu")
-    model = ConvAutoencoder(latent_dim=checkpoint["latent_dim"])
+def resolve_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def load_artifacts(model_dir: Path) -> Tuple[HybridClassifier, Dict[str, int], List[str], dict, torch.Tensor]:
+    checkpoint = torch.load(model_dir / "model.pt", map_location="cpu")
+    labels: List[str] = checkpoint["labels"]
+    model = HybridClassifier(
+        num_classes=len(labels),
+        image_embedding_dim=IMAGE_EMBEDDING_DIM,
+        graph_embedding_dim=GRAPH_EMBEDDING_DIM,
+    )
     model.load_state_dict(checkpoint["state_dict"])
-    labels = checkpoint["labels"]
-    with (model_dir / "pca.pkl").open("rb") as file:
-        pca = pickle.load(file)
-    with (model_dir / "classifier.pkl").open("rb") as file:
-        classifier = pickle.load(file)
-    return model, pca, classifier, labels
+    with (model_dir / "class_map.json").open("r", encoding="utf-8") as file:
+        class_map = json.load(file)
+    with (model_dir / "thresholds.json").open("r", encoding="utf-8") as file:
+        thresholds = json.load(file)
+    proto_checkpoint = torch.load(model_dir / "prototypes.pt", map_location="cpu")
+    prototypes = proto_checkpoint["prototypes"]
+    return model, class_map["class_to_idx"], class_map["idx_to_class"], thresholds, prototypes
 
 
-def classify_sketch(
-    model: ConvAutoencoder,
-    pca: PCA,
-    classifier: KNeighborsClassifier,
-    sketch: np.ndarray,
-    labels: List[str],
-    error_threshold: float = ERROR_THRESHOLD,
-    ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
-) -> str:
-    processed = preprocess(sketch)
-    tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
+def predict_symbol(
+    model: HybridClassifier,
+    image: np.ndarray,
+    prototypes: torch.Tensor,
+    thresholds: dict,
+) -> Tuple[int | None, dict]:
+    preprocess_result = preprocess_image(image)
+    graph = extract_graph(preprocess_result.cleaned)
+    device = resolve_device()
+    model = model.to(device)
+    image_tensor = torch.from_numpy(preprocess_result.final).unsqueeze(0).unsqueeze(0).float().to(device)
+    graph_tensor = torch.from_numpy(graph.graph_features).unsqueeze(0).float().to(device)
+    prototypes = prototypes.to(device)
     model.eval()
     with torch.no_grad():
-        recon, latent = model(tensor)
-    recon_error = torch.mean((recon - tensor) ** 2).item()
-    if recon_error > error_threshold:
-        return "Novelty detected: unknown component."
-    reduced = pca.transform(latent.cpu().numpy())
-    distances, indices = classifier.kneighbors(reduced, n_neighbors=min(3, len(labels)))
-    predicted_index = int(classifier.predict(reduced)[0])
-    if distances.shape[1] > 1 and (distances[0, 1] - distances[0, 0]) < ambiguity_threshold:
-        return "Ambiguity detected: ask user to clarify between closest symbols."
-    if predicted_index < 0 or predicted_index >= len(labels):
-        return "Model output out of range. Check training labels."
-    return f"Detected: {labels[predicted_index]}"
+        logits, fused_embedding = model(image_tensor, graph_tensor)
+        probs = torch.softmax(logits, dim=1)
+    pmax, pred_idx = torch.max(probs, dim=1)
+    pmax_value = float(pmax.item())
+    pred_idx_value = int(pred_idx.item())
+    emb = fused_embedding.squeeze(0).cpu().numpy()
+    distances = np.linalg.norm(prototypes.cpu().numpy() - emb[None, :], axis=1)
+    dmin = float(distances.min())
+    conf_threshold = float(thresholds.get("conf_threshold", 0.0))
+    dist_threshold = float(thresholds.get("dist_threshold", float("inf")))
+
+    # Unknown detection uses confidence + prototype distance thresholds on fused_embedding.
+    is_unknown = pmax_value < conf_threshold or dmin > dist_threshold
+    details = {
+        "pmax": pmax_value,
+        "conf_threshold": conf_threshold,
+        "dmin": dmin,
+        "dist_threshold": dist_threshold,
+        "probs": probs.squeeze(0).cpu().numpy().tolist(),
+        "pred_idx": pred_idx_value,
+    }
+    label_idx = None if is_unknown else pred_idx_value
+    return label_idx, details

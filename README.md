@@ -1,6 +1,6 @@
 # Auto-Schematic (Intelligent Circuit Digitizer)
 
-Auto-Schematic converts rough, hand-drawn circuit sketches into clean CAD-like symbols while detecting ambiguous or novel components. The code is segmented into the `FH_Circuit` package, similar to the referenced structure.
+Auto-Schematic classifies isolated, hand-drawn circuit symbols with a supervised classifier and explicit unknown detection gates. The pipeline combines image features with a skeleton topology graph for each symbol.
 
 ## Dataset Used
 
@@ -10,9 +10,10 @@ Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component c
 
 **Training pipeline files**
 - `FH_Circuit/data.py`: training data loader (reads labels from folder names).
-- `FH_Circuit/preprocess.py`: thresholding, skeletonization, dilation.
-- `FH_Circuit/model.py`: convolutional autoencoder.
-- `FH_Circuit/train.py`: training loop + PCA/k-means artifacts.
+- `FH_Circuit/preprocess.py`: preprocessing (denoise, binarize, morphology, crop/pad/resize).
+- `FH_Circuit/graph_extract.py`: skeleton topology graph + feature extraction.
+- `FH_Circuit/model.py`: hybrid image + graph classifier.
+- `FH_Circuit/train.py`: supervised training loop + unknown detection artifacts.
 - `FH_Circuit/dataset.py`: PyTorch dataset wrapper used by training.
 
 **Inference/GUI files**
@@ -28,7 +29,7 @@ Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component c
 ### 1) Install dependencies
 
 ```bash
-pip install numpy Pillow scikit-image scikit-learn torch
+pip install numpy Pillow scikit-image torch
 ```
 
 ### 2) Verify training data layout
@@ -48,7 +49,7 @@ The folder name becomes the label used during training and inference.
 ### 3) Train the model
 
 ```bash
-python main.py train --dataset-dir FH_Circuit/Training_Data --epochs 5 --output ./artifacts
+python main.py train --dataset-dir FH_Circuit/Training_Data --epochs 50 --output ./artifacts
 ```
 
 ### 4) Run the GUI
@@ -60,10 +61,16 @@ python main.py gui --model-dir ./artifacts
 ### 5) Classify a saved image
 
 ```bash
-python main.py classify path/to/sketch.png --model-dir ./artifacts
+python main.py predict path/to/sketch.png --model-dir ./artifacts
+```
+
+### 6) Debug graph extraction
+
+```bash
+python main.py debug_graph path/to/sketch.png --output ./artifacts/debug_graph_one
 ```
 
 ## Dependencies
 
-- Training: `numpy`, `Pillow`, `scikit-image`, `scikit-learn`, `torch`
+- Training: `numpy`, `Pillow`, `scikit-image`, `torch`
 - GUI: `tkinter` (bundled with most Python distributions)

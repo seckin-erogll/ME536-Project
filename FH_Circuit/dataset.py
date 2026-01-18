@@ -9,20 +9,24 @@ import torch
 from torch.utils.data import Dataset
 
 from FH_Circuit.data import Sample
-from FH_Circuit.preprocess import preprocess
+from FH_Circuit.graph_extract import extract_graph
+from FH_Circuit.preprocess import preprocess_image
 
 
 class SymbolDataset(Dataset):
-    def __init__(self, samples: List[Sample], labels: List[str]):
+    def __init__(self, samples: List[Sample], labels: List[str], deskew: bool = False):
         self.samples = samples
+        self.deskew = deskew
         self.label_to_index: Dict[str, int] = {label: idx for idx, label in enumerate(labels)}
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int]:
         sample = self.samples[idx]
-        image = preprocess(sample.image)
-        tensor = torch.from_numpy(image).unsqueeze(0)
+        preprocess_result = preprocess_image(sample.image, deskew=self.deskew)
+        graph = extract_graph(preprocess_result.cleaned)
+        image_tensor = torch.from_numpy(preprocess_result.final).unsqueeze(0)
+        graph_tensor = torch.from_numpy(graph.graph_features)
         label = self.label_to_index[sample.label]
-        return tensor, label
+        return image_tensor, graph_tensor, label

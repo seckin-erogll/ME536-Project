@@ -1,28 +1,41 @@
-"""Training utilities for Auto-Schematic."""
+"""Training utilities for supervised circuit symbol classifier."""
 
 from __future__ import annotations
 
-import pickle
+import json
+import random
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-from PIL import Image
-from sklearn.decomposition import PCA
-from sklearn.neighbors import KNeighborsClassifier
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from FH_Circuit.config import (
+    CONFIDENCE_QUANTILE,
+    DEFAULT_SEED,
+    DISTANCE_QUANTILE,
+    GRAPH_EMBEDDING_DIM,
+    IMAGE_EMBEDDING_DIM,
+)
 from FH_Circuit.data import Sample
 from FH_Circuit.dataset import SymbolDataset
-from FH_Circuit.model import ConvAutoencoder
-from FH_Circuit.preprocess import preprocess
+from FH_Circuit.graph_extract import extract_graph
+from FH_Circuit.model import HybridClassifier
+from FH_Circuit.preprocess import preprocess_image
+
+
+def set_seed(seed: int = DEFAULT_SEED) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
 def resolve_device() -> torch.device:
@@ -39,137 +52,248 @@ def describe_device(device: torch.device) -> str:
     return device.type
 
 
-def train_autoencoder(
+def split_indices(count: int, val_ratio: float = 0.2, seed: int = DEFAULT_SEED) -> Tuple[List[int], List[int]]:
+    indices = list(range(count))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    split = int(count * (1 - val_ratio))
+    return indices[:split], indices[split:]
+
+
+def train_classifier(
     dataset: SymbolDataset,
-    epochs: int = 5,
+    labels: List[str],
+    output_dir: Path,
+    epochs: int = 50,
     batch_size: int = 32,
-    latent_dim: int = 32,
-    log_interval: int = 0,
-) -> ConvAutoencoder:
+    log_interval: int = 20,
+) -> Dict[str, List[float]]:
     device = resolve_device()
     print(f"Training on device: {describe_device(device)}")
-    print(f"Dataset size: {len(dataset)} | Batch size: {batch_size} | Latent dim: {latent_dim}")
-    model = ConvAutoencoder(latent_dim=latent_dim).to(device)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    print(f"Dataset size: {len(dataset)} | Batch size: {batch_size}")
+
+    train_indices, val_indices = split_indices(len(dataset))
+    train_set = Subset(dataset, train_indices)
+    val_set = Subset(dataset, val_indices)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
+
+    model = HybridClassifier(
+        num_classes=len(labels),
+        image_embedding_dim=IMAGE_EMBEDDING_DIM,
+        graph_embedding_dim=GRAPH_EMBEDDING_DIM,
+    ).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.MSELoss()
+    criterion = nn.CrossEntropyLoss()
+
+    metrics: Dict[str, List[float]] = {
+        "train_loss": [],
+        "train_acc": [],
+        "val_loss": [],
+        "val_acc": [],
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_val_acc = -1.0
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
+        running_correct = 0
+        total = 0
         start = time.perf_counter()
-        for step, (inputs, _) in enumerate(loader, start=1):
-            inputs = inputs.to(device)
-            recon, _ = model(inputs)
-            loss = criterion(recon, inputs)
+
+        for step, (images, graph_feats, labels_batch) in enumerate(train_loader, start=1):
+            images = images.float().to(device)
+            graph_feats = graph_feats.float().to(device)
+            labels_batch = labels_batch.to(device)
+            logits, _ = model(images, graph_feats)
+            loss = criterion(logits, labels_batch)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-            if epoch == 1 and step == 1:
-                print(
-                    "Debug first batch:",
-                    f"inputs={tuple(inputs.shape)}",
-                    f"min={inputs.min().item():.3f}",
-                    f"max={inputs.max().item():.3f}",
-                    f"loss={loss.item():.6f}",
-                )
+
+            running_loss += loss.item() * images.size(0)
+            preds = torch.argmax(logits, dim=1)
+            running_correct += (preds == labels_batch).sum().item()
+            total += images.size(0)
+
             if log_interval and step % log_interval == 0:
-                avg_loss = running_loss / step
-                print(f"Epoch {epoch}/{epochs} | Step {step}/{len(loader)} | Loss {avg_loss:.6f}")
-        avg_epoch_loss = running_loss / max(1, len(loader))
+                print(
+                    f"Epoch {epoch}/{epochs} | Step {step}/{len(train_loader)} | "
+                    f"Loss {running_loss / total:.4f} | Acc {running_correct / total:.3f}"
+                )
+
+        train_loss = running_loss / max(1, total)
+        train_acc = running_correct / max(1, total)
+        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+        metrics["train_loss"].append(train_loss)
+        metrics["train_acc"].append(train_acc)
+        metrics["val_loss"].append(val_loss)
+        metrics["val_acc"].append(val_acc)
+
         duration = time.perf_counter() - start
-        print(f"Epoch {epoch}/{epochs} complete | Avg Loss {avg_epoch_loss:.6f} | {duration:.1f}s")
-    return model
+        print(
+            f"Epoch {epoch}/{epochs} complete | Train Loss {train_loss:.4f} | "
+            f"Train Acc {train_acc:.3f} | Val Loss {val_loss:.4f} | Val Acc {val_acc:.3f} | {duration:.1f}s"
+        )
+
+        save_epoch_debug(dataset, output_dir / "debug_preprocess", output_dir / "debug_graph", epoch)
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save({"state_dict": model.state_dict(), "labels": labels}, output_dir / "model.pt")
+
+    with (output_dir / "train_metrics.json").open("w", encoding="utf-8") as file:
+        json.dump(metrics, file, indent=2)
+
+    return metrics
 
 
-def fit_pca_classifier(
-    latents: np.ndarray,
-    sample_labels: List[int],
-    components: int,
-) -> Tuple[PCA, KNeighborsClassifier]:
-    pca = PCA(n_components=components)
-    reduced = pca.fit_transform(latents)
-    unique_labels = sorted(set(sample_labels))
-    classifier = KNeighborsClassifier(n_neighbors=min(3, len(unique_labels)))
-    classifier.fit(reduced, sample_labels)
-    return pca, classifier
-
-
-def extract_latents(model, dataset):
+def evaluate(
+    model: HybridClassifier,
+    loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+) -> Tuple[float, float]:
     model.eval()
-    latents = []
-    sample_labels = []
-
-    device = next(model.parameters()).device
-
+    total_loss = 0.0
+    total_correct = 0
+    total = 0
     with torch.no_grad():
-        for image, label in dataset:
-            image = image.to(device)
-            _, latent = model(image.unsqueeze(0))
-            latents.append(latent.detach().cpu())
-            sample_labels.append(int(label))
+        for images, graph_feats, labels_batch in loader:
+            images = images.float().to(device)
+            graph_feats = graph_feats.float().to(device)
+            labels_batch = labels_batch.to(device)
+            logits, _ = model(images, graph_feats)
+            loss = criterion(logits, labels_batch)
+            total_loss += loss.item() * images.size(0)
+            preds = torch.argmax(logits, dim=1)
+            total_correct += (preds == labels_batch).sum().item()
+            total += images.size(0)
+    return total_loss / max(1, total), total_correct / max(1, total)
 
-    return torch.cat(latents, dim=0), sample_labels
 
-
-def save_reconstructions(
-    model: ConvAutoencoder,
-    samples: List[Sample],
-    output_dir: Path,
+def save_epoch_debug(
+    dataset: SymbolDataset,
+    preprocess_dir: Path,
+    graph_dir: Path,
+    epoch: int,
+    max_samples: int = 3,
 ) -> None:
-    recon_dir = output_dir / "reconstructions"
-    recon_dir.mkdir(parents=True, exist_ok=True)
-    device = next(model.parameters()).device
+    for idx in range(min(max_samples, len(dataset))):
+        sample = dataset.samples[idx]
+        prefix = f"epoch{epoch:02d}_sample{idx:02d}"
+        preprocess_result = preprocess_image(sample.image, debug_dir=preprocess_dir, debug_prefix=prefix)
+        extract_graph(preprocess_result.cleaned, debug_dir=graph_dir, debug_prefix=prefix)
+
+
+def compute_prototypes(
+    model: HybridClassifier,
+    loader: DataLoader,
+    num_classes: int,
+    device: torch.device,
+) -> torch.Tensor:
     model.eval()
-    label_counts: dict[str, int] = {}
+    embeddings: List[List[np.ndarray]] = [[] for _ in range(num_classes)]
     with torch.no_grad():
-        for sample in samples:
-            label = sample.label
-            label_counts[label] = label_counts.get(label, 0) + 1
-            label_dir = recon_dir / label
-            label_dir.mkdir(parents=True, exist_ok=True)
-            processed = preprocess(sample.image)
-            tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float().to(device)
-            recon, _ = model(tensor)
-            recon_np = recon.squeeze(0).squeeze(0).cpu().numpy()
-            recon_img = (np.clip(recon_np, 0, 1) * 255).astype(np.uint8)
-            Image.fromarray(sample.image).save(label_dir / f"{label_counts[label]:04d}_input.png")
-            Image.fromarray(recon_img).save(label_dir / f"{label_counts[label]:04d}_recon.png")
+        for images, graph_feats, labels_batch in loader:
+            images = images.float().to(device)
+            graph_feats = graph_feats.float().to(device)
+            logits, fused = model(images, graph_feats)
+            for emb, label in zip(fused.cpu().numpy(), labels_batch.numpy()):
+                embeddings[int(label)].append(emb)
+    prototypes = []
+    for class_embs in embeddings:
+        if not class_embs:
+            prototypes.append(np.zeros(fused.shape[1], dtype=np.float32))
+        else:
+            prototypes.append(np.mean(class_embs, axis=0))
+    return torch.tensor(np.stack(prototypes), dtype=torch.float32)
 
 
-
-def save_artifacts(
-    output_dir: Path,
-    model: ConvAutoencoder,
-    pca: PCA,
-    classifier: KNeighborsClassifier,
-    latent_dim: int,
-    labels: List[str],
-) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {"state_dict": model.state_dict(), "latent_dim": latent_dim, "labels": labels},
-        output_dir / "autoencoder.pt",
-    )
-    with (output_dir / "pca.pkl").open("wb") as file:
-        pickle.dump(pca, file)
-    with (output_dir / "classifier.pkl").open("wb") as file:
-        pickle.dump(classifier, file)
+def compute_thresholds(
+    model: HybridClassifier,
+    val_loader: DataLoader,
+    prototypes: torch.Tensor,
+    device: torch.device,
+) -> Tuple[float, float]:
+    model.eval()
+    correct_pmax: List[float] = []
+    correct_distances: List[float] = []
+    with torch.no_grad():
+        for images, graph_feats, labels_batch in val_loader:
+            images = images.float().to(device)
+            graph_feats = graph_feats.float().to(device)
+            labels_batch = labels_batch.to(device)
+            logits, fused = model(images, graph_feats)
+            probs = torch.softmax(logits, dim=1)
+            pmax, preds = torch.max(probs, dim=1)
+            for idx in range(images.size(0)):
+                if preds[idx] != labels_batch[idx]:
+                    continue
+                correct_pmax.append(float(pmax[idx].cpu().item()))
+                emb = fused[idx].cpu().numpy()
+                distances = np.linalg.norm(prototypes.numpy() - emb[None, :], axis=1)
+                correct_distances.append(float(distances.min()))
+    if not correct_pmax:
+        conf_threshold = 0.0
+    else:
+        conf_threshold = float(np.quantile(correct_pmax, CONFIDENCE_QUANTILE))
+    if not correct_distances:
+        dist_threshold = float("inf")
+    else:
+        dist_threshold = float(np.quantile(correct_distances, DISTANCE_QUANTILE))
+    return conf_threshold, dist_threshold
 
 
 def train_pipeline(
     samples: List[Sample],
     labels: List[str],
     output_dir: Path,
-    epochs: int = 5,
+    epochs: int = 50,
     batch_size: int = 32,
-    latent_dim: int = 32,
 ) -> None:
+    set_seed()
     dataset = SymbolDataset(samples, labels)
-    model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
-    latents, sample_labels = extract_latents(model, dataset)
-    components = min(latent_dim, 16)
-    pca, classifier = fit_pca_classifier(latents, sample_labels, components)
-    save_artifacts(output_dir, model, pca, classifier, latent_dim, labels)
-    print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
-    save_reconstructions(model, samples, output_dir)
+    metrics = train_classifier(dataset, labels, output_dir, epochs=epochs, batch_size=batch_size)
+
+    train_indices, val_indices = split_indices(len(dataset))
+    train_set = Subset(dataset, train_indices)
+    val_set = Subset(dataset, val_indices)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
+
+    device = resolve_device()
+    checkpoint = torch.load(output_dir / "model.pt", map_location=device)
+    model = HybridClassifier(
+        num_classes=len(labels),
+        image_embedding_dim=IMAGE_EMBEDDING_DIM,
+        graph_embedding_dim=GRAPH_EMBEDDING_DIM,
+    ).to(device)
+    model.load_state_dict(checkpoint["state_dict"])
+
+    prototypes = compute_prototypes(model, train_loader, len(labels), device)
+    torch.save({"prototypes": prototypes, "labels": labels}, output_dir / "prototypes.pt")
+
+    conf_threshold, dist_threshold = compute_thresholds(model, val_loader, prototypes, device)
+    with (output_dir / "thresholds.json").open("w", encoding="utf-8") as file:
+        json.dump(
+            {"conf_threshold": conf_threshold, "dist_threshold": dist_threshold},
+            file,
+            indent=2,
+        )
+
+    with (output_dir / "class_map.json").open("w", encoding="utf-8") as file:
+        json.dump(
+            {"class_to_idx": {label: idx for idx, label in enumerate(labels)}, "idx_to_class": labels},
+            file,
+            indent=2,
+        )
+
+    print("Saved artifacts:")
+    print(f"  - model.pt")
+    print(f"  - prototypes.pt")
+    print(f"  - thresholds.json")
+    print(f"  - class_map.json")
+    print(f"  - train_metrics.json")

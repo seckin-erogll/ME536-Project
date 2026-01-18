@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.classify import load_artifacts, predict_symbol
 from FH_Circuit.data import load_training_dataset
 from FH_Circuit.gui import launch_gui
 from FH_Circuit.train import train_pipeline
@@ -59,7 +59,6 @@ def run_train(args: argparse.Namespace) -> None:
         print("Enter training parameters (press Enter to accept defaults).")
         args.epochs = _prompt_int("Epochs", args.epochs)
         args.batch_size = _prompt_int("Batch size", args.batch_size)
-        args.latent_dim = _prompt_int("Latent dimension", args.latent_dim)
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
         args.output = _prompt_path("Output directory", args.output)
     samples, labels = load_training_dataset(args.dataset_dir)
@@ -69,14 +68,7 @@ def run_train(args: argparse.Namespace) -> None:
     print("Loaded training data:")
     for label in labels:
         print(f"  - {label}: {label_counts[label]} samples")
-    train_pipeline(
-        samples,
-        labels,
-        output_dir=args.output,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        latent_dim=args.latent_dim,
-    )
+    train_pipeline(samples, labels, output_dir=args.output, epochs=args.epochs, batch_size=args.batch_size)
     print(f"Training complete. Artifacts saved to {args.output}.")
 
 
@@ -88,29 +80,60 @@ def run_gui(args: argparse.Namespace) -> None:
     launch_gui(args.model_dir, args.dataset_dir)
 
 
-def run_classify(args: argparse.Namespace) -> None:
+def run_predict(args: argparse.Namespace) -> None:
     if args.prompt and args.image is None:
         args.image = _prompt_file_path("Image path")
     if args.prompt:
         args.model_dir = _prompt_path("Model directory", args.model_dir)
     if args.image is None:
         raise ValueError("Image path is required for classification.")
-    model, pca, classifier, labels = load_artifacts(args.model_dir)
-    image = Image.open(args.image).convert("L")
-    image = image.resize((64, 64), resample=Image.BILINEAR)
-    sketch = np.array(image)
-    result = classify_sketch(model, pca, classifier, sketch, labels)
-    print(result)
+    model, _, labels, thresholds, prototypes = load_artifacts(args.model_dir)
+    image = np.array(Image.open(args.image))
+    label_idx, details = predict_symbol(model, image, prototypes, thresholds)
+    if label_idx is None:
+        print(
+            "Prediction: unknown\n"
+            f"  pmax={details['pmax']:.4f} (conf_threshold={details['conf_threshold']:.4f})\n"
+            f"  dmin={details['dmin']:.4f} (dist_threshold={details['dist_threshold']:.4f})"
+        )
+    else:
+        top_indices = np.argsort(details["probs"])[-3:][::-1]
+        top_probs = [(labels[idx], float(details["probs"][idx])) for idx in top_indices]
+        print(f"Prediction: {labels[label_idx]}")
+        print(
+            f"  pmax={details['pmax']:.4f} (conf_threshold={details['conf_threshold']:.4f})\n"
+            f"  dmin={details['dmin']:.4f} (dist_threshold={details['dist_threshold']:.4f})"
+        )
+        print("  Top-3 probs:")
+        for label, prob in top_probs:
+            print(f"    - {label}: {prob:.4f}")
+
+
+def run_debug_graph(args: argparse.Namespace) -> None:
+    if args.prompt and args.image is None:
+        args.image = _prompt_file_path("Image path")
+    if args.image is None:
+        raise ValueError("Image path is required for debug_graph.")
+    from FH_Circuit.graph_extract import extract_graph
+    from FH_Circuit.preprocess import preprocess_image
+
+    image = np.array(Image.open(args.image))
+    result = preprocess_image(
+        image,
+        debug_dir=args.output,
+        debug_prefix="debug",
+    )
+    extract_graph(result.cleaned, debug_dir=args.output, debug_prefix="debug")
+    print(f"Debug outputs saved to {args.output}")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Auto-Schematic pipeline.")
     subparsers = parser.add_subparsers(dest="command")
 
-    train = subparsers.add_parser("train", help="Train autoencoder and fit PCA + k-means.")
-    train.add_argument("--epochs", type=int, default=5, help="Training epochs.")
+    train = subparsers.add_parser("train", help="Train supervised classifier.")
+    train.add_argument("--epochs", type=int, default=50, help="Training epochs.")
     train.add_argument("--batch-size", type=int, default=32, help="Training batch size.")
-    train.add_argument("--latent-dim", type=int, default=32, help="Latent embedding dimension.")
     train.add_argument(
         "--dataset-dir",
         type=Path,
@@ -132,11 +155,22 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     gui.set_defaults(func=run_gui, prompt=True)
 
-    classify = subparsers.add_parser("classify", help="Classify a sketch image.")
-    classify.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
-    classify.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
-    classify.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
-    classify.set_defaults(func=run_classify, prompt=True)
+    predict = subparsers.add_parser("predict", help="Predict a symbol label from an image.")
+    predict.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
+    predict.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
+    predict.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
+    predict.set_defaults(func=run_predict, prompt=True)
+
+    debug_graph = subparsers.add_parser("debug_graph", help="Debug skeleton graph extraction.")
+    debug_graph.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
+    debug_graph.add_argument(
+        "--output",
+        type=Path,
+        default=Path("./artifacts/debug_graph_one"),
+        help="Output directory for debug artifacts.",
+    )
+    debug_graph.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
+    debug_graph.set_defaults(func=run_debug_graph, prompt=True)
 
     return parser
 
@@ -145,7 +179,10 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.command is None:
-        choice = _prompt_choice("Select mode", {"train": "Train", "gui": "GUI", "classify": "Classify"})
+        choice = _prompt_choice(
+            "Select mode",
+            {"train": "Train", "gui": "GUI", "predict": "Predict", "debug_graph": "Debug Graph"},
+        )
         args = parser.parse_args([choice])
     args.func(args)
 

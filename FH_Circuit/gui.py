@@ -10,12 +10,12 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.classify import load_artifacts, predict_symbol
 
 
 class SketchGUI:
     def __init__(self, model_dir: Path, dataset_dir: Path, canvas_size: int = 256) -> None:
-        self.model, self.pca, self.classifier, self.labels = load_artifacts(model_dir)
+        self.model, _, self.labels, self.thresholds, self.prototypes = load_artifacts(model_dir)
         self.dataset_dir = dataset_dir
         self.canvas_size = canvas_size
         self.root = tk.Tk()
@@ -73,12 +73,21 @@ class SketchGUI:
         self.status.set("Canvas cleared.")
 
     def on_classify(self) -> None:
-        resized = self.image.resize((64, 64), resample=Image.BILINEAR)
-        sketch = np.array(resized)
+        sketch = np.array(self.image)
         try:
-            result = classify_sketch(self.model, self.pca, self.classifier, sketch, self.labels)
+            label_idx, details = predict_symbol(self.model, sketch, self.prototypes, self.thresholds)
         except ValueError as exc:
             result = str(exc)
+        else:
+            if label_idx is None:
+                result = (
+                    f"Unknown | pmax={details['pmax']:.3f} "
+                    f"(thr {details['conf_threshold']:.3f}) "
+                    f"| dmin={details['dmin']:.3f} "
+                    f"(thr {details['dist_threshold']:.3f})"
+                )
+            else:
+                result = f"Detected: {self.labels[label_idx]}"
         self.status.set(result)
         self._update_example_from_result(result)
 
