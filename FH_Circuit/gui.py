@@ -15,7 +15,7 @@ from FH_Circuit.classify import classify_sketch, load_artifacts
 
 class SketchGUI:
     def __init__(self, model_dir: Path, dataset_dir: Path, canvas_size: int = 256) -> None:
-        self.model, self.pca, self.classifier, self.labels = load_artifacts(model_dir)
+        self.artifacts = load_artifacts(model_dir)
         self.dataset_dir = dataset_dir
         self.canvas_size = canvas_size
         self.root = tk.Tk()
@@ -76,7 +76,7 @@ class SketchGUI:
         resized = self.image.resize((64, 64), resample=Image.BILINEAR)
         sketch = np.array(resized)
         try:
-            result = classify_sketch(self.model, self.pca, self.classifier, sketch, self.labels)
+            result = classify_sketch(self.artifacts, sketch)
         except ValueError as exc:
             result = str(exc)
         self.status.set(result)

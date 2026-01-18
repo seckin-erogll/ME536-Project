@@ -14,6 +14,17 @@ from PIL import Image, ImageDraw
 from FH_Circuit.config import IMAGE_SIZE
 
 
+COARSE_GROUPS: dict[str, list[str]] = {
+    "zigzag/coil": ["resistor", "inductor"],
+    "parallel": ["capacitor"],
+    "diode-like": ["diode"],
+    "source": ["source"],
+    "ground": ["ground"],
+}
+
+AMBIGUOUS_COARSE_GROUPS = {"zigzag/coil"}
+
+
 @dataclasses.dataclass
 class Sample:
     image: np.ndarray
@@ -166,3 +177,23 @@ def save_samples(samples: List[Sample], output_dir: Path) -> None:
     for idx, sample in enumerate(samples):
         image = Image.fromarray(sample.image)
         image.save(output_dir / f"{sample.label}_{idx:04d}.png")
+
+
+def resolve_coarse_label(label: str) -> str:
+    for group, members in COARSE_GROUPS.items():
+        if label in members:
+            return group
+    return label
+
+
+def list_coarse_labels(labels: List[str]) -> List[str]:
+    coarse_labels: List[str] = []
+    for label in labels:
+        group = resolve_coarse_label(label)
+        if group not in coarse_labels:
+            coarse_labels.append(group)
+    return coarse_labels
+
+
+def labels_for_coarse_group(group: str) -> List[str]:
+    return COARSE_GROUPS.get(group, [group])

@@ -19,10 +19,16 @@ from torch.utils.data import DataLoader
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from FH_Circuit.data import Sample
+from FH_Circuit.data import (
+    AMBIGUOUS_COARSE_GROUPS,
+    Sample,
+    labels_for_coarse_group,
+    list_coarse_labels,
+    resolve_coarse_label,
+)
 from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.model import ConvAutoencoder
-from FH_Circuit.preprocess import preprocess
+from FH_Circuit.preprocess import extract_graph_features, preprocess
 
 
 def resolve_device() -> torch.device:
@@ -95,7 +101,7 @@ def fit_pca_classifier(
     return pca, classifier
 
 
-def extract_latents(model, dataset):
+def extract_latents(model, dataset) -> np.ndarray:
     model.eval()
     latents = []
     sample_labels = []
@@ -109,7 +115,7 @@ def extract_latents(model, dataset):
             latents.append(latent.detach().cpu())
             sample_labels.append(int(label))
 
-    return torch.cat(latents, dim=0), sample_labels
+    return torch.cat(latents, dim=0).numpy(), sample_labels
 
 
 def save_reconstructions(
@@ -145,16 +151,48 @@ def save_artifacts(
     classifier: KNeighborsClassifier,
     latent_dim: int,
     labels: List[str],
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
-        {"state_dict": model.state_dict(), "latent_dim": latent_dim, "labels": labels},
+        {
+            "state_dict": model.state_dict(),
+            "latent_dim": latent_dim,
+            "labels": labels,
+            "feature_mean": feature_mean,
+            "feature_std": feature_std,
+        },
         output_dir / "autoencoder.pt",
     )
     with (output_dir / "pca.pkl").open("wb") as file:
         pickle.dump(pca, file)
     with (output_dir / "classifier.pkl").open("wb") as file:
         pickle.dump(classifier, file)
+
+
+def train_stage(
+    samples: List[Sample],
+    labels: List[str],
+    output_dir: Path,
+    epochs: int,
+    batch_size: int,
+    latent_dim: int,
+) -> None:
+    dataset = SymbolDataset(samples, labels)
+    model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
+    latents, sample_labels = extract_latents(model, dataset)
+    graph_features = np.stack([extract_graph_features(sample.image) for sample in samples])
+    feature_mean = graph_features.mean(axis=0)
+    feature_std = graph_features.std(axis=0)
+    feature_std[feature_std == 0] = 1.0
+    normalized_features = (graph_features - feature_mean) / feature_std
+    combined = np.concatenate([latents, normalized_features], axis=1)
+    components = min(latent_dim, 16)
+    pca, classifier = fit_pca_classifier(combined, sample_labels, components)
+    save_artifacts(output_dir, model, pca, classifier, latent_dim, labels, feature_mean, feature_std)
+    print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
+    save_reconstructions(model, samples, output_dir)
 
 
 def train_pipeline(
@@ -165,11 +203,34 @@ def train_pipeline(
     batch_size: int = 32,
     latent_dim: int = 32,
 ) -> None:
-    dataset = SymbolDataset(samples, labels)
-    model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
-    latents, sample_labels = extract_latents(model, dataset)
-    components = min(latent_dim, 16)
-    pca, classifier = fit_pca_classifier(latents, sample_labels, components)
-    save_artifacts(output_dir, model, pca, classifier, latent_dim, labels)
-    print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
-    save_reconstructions(model, samples, output_dir)
+    coarse_labels = list_coarse_labels(labels)
+    coarse_samples = [
+        Sample(image=sample.image, label=resolve_coarse_label(sample.label)) for sample in samples
+    ]
+    coarse_dir = output_dir / "coarse"
+    print(f"Training coarse stage with labels: {', '.join(coarse_labels)}")
+    train_stage(
+        coarse_samples,
+        coarse_labels,
+        coarse_dir,
+        epochs=epochs,
+        batch_size=batch_size,
+        latent_dim=latent_dim,
+    )
+    for group in sorted(AMBIGUOUS_COARSE_GROUPS):
+        group_labels = labels_for_coarse_group(group)
+        fine_labels = [label for label in labels if label in group_labels]
+        fine_samples = [sample for sample in samples if sample.label in group_labels]
+        if not fine_samples:
+            print(f"Skipping fine stage for '{group}': no samples found.")
+            continue
+        fine_dir = output_dir / "fine" / group
+        print(f"Training fine stage for '{group}' with labels: {', '.join(fine_labels)}")
+        train_stage(
+            fine_samples,
+            fine_labels,
+            fine_dir,
+            epochs=epochs,
+            batch_size=batch_size,
+            latent_dim=latent_dim,
+        )

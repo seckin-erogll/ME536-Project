@@ -20,6 +20,65 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
     return dilated.astype(np.float32)
 
 
+def extract_graph_features(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
+    processed = preprocess(image, min_area=min_area)
+    return extract_graph_features_from_binary(processed)
+
+
+def extract_graph_features_from_binary(binary: np.ndarray) -> np.ndarray:
+    skeleton = morphology.skeletonize(binary > 0)
+    coords = np.column_stack(np.where(skeleton))
+    if coords.size == 0:
+        return np.zeros(6, dtype=np.float32)
+    skeleton_set = {tuple(coord) for coord in coords}
+    neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+    def neighbor_coords(point: tuple[int, int]) -> list[tuple[int, int]]:
+        row, col = point
+        return [
+            (row + dr, col + dc)
+            for dr, dc in neighbors
+            if (row + dr, col + dc) in skeleton_set
+        ]
+
+    degrees = {point: len(neighbor_coords(point)) for point in skeleton_set}
+    endpoints = [point for point, degree in degrees.items() if degree == 1]
+    junctions = [point for point, degree in degrees.items() if degree >= 3]
+    nodes = set(endpoints + junctions)
+    edge_lengths: list[int] = []
+    visited_steps: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+
+    for node in nodes:
+        for neighbor in neighbor_coords(node):
+            step = (node, neighbor)
+            if step in visited_steps:
+                continue
+            length = 1
+            prev = node
+            current = neighbor
+            visited_steps.add(step)
+            while current not in nodes:
+                next_candidates = [cand for cand in neighbor_coords(current) if cand != prev]
+                if not next_candidates:
+                    break
+                next_point = next_candidates[0]
+                visited_steps.add((current, next_point))
+                prev, current = current, next_point
+                length += 1
+            edge_lengths.append(length)
+
+    total_pixels = len(skeleton_set)
+    num_endpoints = len(endpoints)
+    num_junctions = len(junctions)
+    avg_edge_length = float(np.mean(edge_lengths)) if edge_lengths else 0.0
+    max_edge_length = float(np.max(edge_lengths)) if edge_lengths else 0.0
+    mean_degree = float(np.mean(list(degrees.values()))) if degrees else 0.0
+    return np.array(
+        [total_pixels, num_endpoints, num_junctions, avg_edge_length, max_edge_length, mean_degree],
+        dtype=np.float32,
+    )
+
+
 def _normalize_to_canvas(binary: np.ndarray) -> np.ndarray:
     coords = np.column_stack(np.where(binary > 0))
     if coords.size == 0:
