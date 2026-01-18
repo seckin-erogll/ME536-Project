@@ -35,7 +35,11 @@ class TwoStageArtifacts:
 
 
 def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
-    checkpoint = torch.load(model_dir / "autoencoder.pt", map_location="cpu")
+    checkpoint_path = model_dir / "autoencoder.pt"
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model = ConvAutoencoder(latent_dim=checkpoint["latent_dim"])
     model.load_state_dict(checkpoint["state_dict"])
     labels = checkpoint["labels"]
