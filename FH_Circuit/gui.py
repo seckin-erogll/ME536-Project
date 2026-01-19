@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.detection import classify_component_with_rotations, detect_component_regions
 
 
 class SketchGUI:
@@ -30,13 +31,31 @@ class SketchGUI:
         self.example_caption = ttk.Label(self.root, text="")
         self.example_caption.grid(row=3, column=3, padx=10, pady=(0, 10))
 
-        self.status = tk.StringVar(value="Draw a circuit symbol.")
+        self.status = tk.StringVar(value="Draw a circuit or symbol.")
         self.status_label = ttk.Label(self.root, textvariable=self.status)
         self.status_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
 
         ttk.Button(self.root, text="Classify", command=self.on_classify).grid(row=2, column=0, padx=5, pady=5)
-        ttk.Button(self.root, text="Clear", command=self.on_clear).grid(row=2, column=1, padx=5, pady=5)
-        ttk.Button(self.root, text="Quit", command=self.root.destroy).grid(row=2, column=2, padx=5, pady=5)
+        ttk.Button(self.root, text="Detect components", command=self.on_detect_components).grid(
+            row=2, column=1, padx=5, pady=5
+        )
+        ttk.Button(self.root, text="Clear", command=self.on_clear).grid(row=2, column=2, padx=5, pady=5)
+        ttk.Button(self.root, text="Quit", command=self.root.destroy).grid(row=3, column=2, padx=5, pady=5)
+
+        self.brush_size = tk.IntVar(value=6)
+        ttk.Label(self.root, text="Brush size").grid(row=3, column=0, padx=5, pady=(0, 5), sticky="w")
+        ttk.Scale(
+            self.root,
+            from_=2,
+            to=16,
+            orient="horizontal",
+            variable=self.brush_size,
+        ).grid(row=3, column=1, padx=5, pady=(0, 5), sticky="ew")
+
+        self.detections_label = ttk.Label(self.root, text="Detected components")
+        self.detections_label.grid(row=4, column=0, columnspan=3, padx=10, pady=(10, 0))
+        self.detections_list = tk.Listbox(self.root, height=6, width=48)
+        self.detections_list.grid(row=5, column=0, columnspan=3, padx=10, pady=(0, 10))
 
         self.image = Image.new("L", (canvas_size, canvas_size), color=0)
         self.draw = ImageDraw.Draw(self.image)
@@ -44,6 +63,7 @@ class SketchGUI:
         self.last_y = None
         self.example_photo = None
         self.example_paths = self._load_example_paths()
+        self.overlay_items: list[int] = []
 
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
@@ -57,8 +77,9 @@ class SketchGUI:
     def on_drag(self, event: tk.Event) -> None:
         if self.last_x is None or self.last_y is None:
             return
-        self.canvas.create_line(self.last_x, self.last_y, event.x, event.y, fill="white", width=6)
-        self.draw.line((self.last_x, self.last_y, event.x, event.y), fill=255, width=6)
+        width = int(self.brush_size.get())
+        self.canvas.create_line(self.last_x, self.last_y, event.x, event.y, fill="white", width=width)
+        self.draw.line((self.last_x, self.last_y, event.x, event.y), fill=255, width=width)
         self.last_x = event.x
         self.last_y = event.y
 
@@ -70,6 +91,8 @@ class SketchGUI:
         self.canvas.delete("all")
         self.image = Image.new("L", (self.canvas_size, self.canvas_size), color=0)
         self.draw = ImageDraw.Draw(self.image)
+        self._clear_overlays()
+        self.detections_list.delete(0, tk.END)
         self.status.set("Canvas cleared.")
 
     def on_classify(self) -> None:
@@ -82,8 +105,48 @@ class SketchGUI:
         self.status.set(result)
         self._update_example_from_result(result)
 
+    def on_detect_components(self) -> None:
+        self._clear_overlays()
+        self.detections_list.delete(0, tk.END)
+        image_array = np.array(self.image)
+        regions = detect_component_regions(image_array)
+        if not regions:
+            self.status.set("No components detected. Try thicker strokes or clearer symbols.")
+            return
+        for region in regions:
+            result, rotation = classify_component_with_rotations(self.artifacts, region.crop)
+            label = result.replace("Detected: ", "", 1).strip()
+            min_row, min_col, max_row, max_col = region.bbox
+            rect = self.canvas.create_rectangle(
+                min_col,
+                min_row,
+                max_col,
+                max_row,
+                outline="red",
+                width=2,
+            )
+            text = self.canvas.create_text(
+                min_col + 4,
+                min_row + 4,
+                anchor="nw",
+                fill="yellow",
+                text=label,
+                font=("TkDefaultFont", 9, "bold"),
+            )
+            self.overlay_items.extend([rect, text])
+            self.detections_list.insert(
+                tk.END,
+                f"{label} | bbox=({min_col}, {min_row})-({max_col}, {max_row}) | rot={rotation}°",
+            )
+        self.status.set(f"Detected {len(regions)} component(s).")
+
     def run(self) -> None:
         self.root.mainloop()
+
+    def _clear_overlays(self) -> None:
+        for item_id in self.overlay_items:
+            self.canvas.delete(item_id)
+        self.overlay_items.clear()
 
     def _load_example_paths(self) -> dict[str, list[Path]]:
         examples: dict[str, list[Path]] = {}
