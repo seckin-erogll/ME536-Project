@@ -15,6 +15,7 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
     if binary.sum() < min_area:
         raise ValueError("Noise detected: sketch too small.")
     binary = _normalize_to_canvas(binary)
+    binary = _center_of_mass_align(binary)
     footprint = morphology.disk(2)
     dilated = morphology.dilation(binary, footprint=footprint)
     closed = morphology.closing(dilated, footprint=footprint)
@@ -100,3 +101,22 @@ def _normalize_to_canvas(binary: np.ndarray) -> np.ndarray:
         np.array(resized) > 0
     ).astype(np.uint8)
     return canvas
+
+
+def _center_of_mass_align(binary: np.ndarray) -> np.ndarray:
+    coords = np.column_stack(np.where(binary > 0))
+    if coords.size == 0:
+        return binary
+    center_yx = coords.mean(axis=0)
+    target = np.array(binary.shape, dtype=np.float32) / 2.0
+    shift = np.round(target - center_yx).astype(int)
+    shifted = np.roll(binary, shift=tuple(shift), axis=(0, 1))
+    if shift[0] > 0:
+        shifted[: shift[0], :] = 0
+    elif shift[0] < 0:
+        shifted[shift[0] :, :] = 0
+    if shift[1] > 0:
+        shifted[:, : shift[1]] = 0
+    elif shift[1] < 0:
+        shifted[:, shift[1] :] = 0
+    return shifted

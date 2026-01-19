@@ -146,7 +146,11 @@ def save_reconstructions(
             label_dir.mkdir(parents=True, exist_ok=True)
             processed = preprocess(sample.image)
             tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float().to(device)
-            recon, _ = model(tensor)
+            outputs = model(tensor)
+            if len(outputs) == 2:
+                recon, _ = outputs
+            else:
+                recon, _, _ = outputs
             recon_np = recon.squeeze(0).squeeze(0).cpu().numpy()
             recon_img = (np.clip(recon_np, 0, 1) * 255).astype(np.uint8)
             Image.fromarray(sample.image).save(label_dir / f"{label_counts[label]:04d}_input.png")
