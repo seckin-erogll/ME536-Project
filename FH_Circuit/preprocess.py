@@ -15,9 +15,10 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
     if binary.sum() < min_area:
         raise ValueError("Noise detected: sketch too small.")
     binary = _normalize_to_canvas(binary)
-    footprint = morphology.footprint_rectangle((1, 1))
+    footprint = morphology.disk(2)
     dilated = morphology.dilation(binary, footprint=footprint)
-    return dilated.astype(np.float32)
+    closed = morphology.closing(dilated, footprint=footprint)
+    return closed.astype(np.float32)
 
 
 def extract_graph_features(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
