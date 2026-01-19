@@ -128,6 +128,27 @@ def run_debug_graph(args: argparse.Namespace) -> None:
     print(f"Debug outputs saved to {args.output}")
 
 
+def run_debug_preprocess_dir(args: argparse.Namespace) -> None:
+    from FH_Circuit.preprocess import preprocess_image
+
+    input_dir = args.input_dir
+    output_dir = args.output
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    for image_path in sorted(input_dir.iterdir()):
+        if image_path.suffix.lower() not in image_extensions:
+            continue
+        prefix = image_path.stem
+        preprocess_image(
+            np.array(Image.open(image_path)),
+            debug_dir=output_dir,
+            debug_prefix=prefix,
+        )
+    print(f"Preprocess debug outputs saved to {output_dir}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Auto-Schematic pipeline.")
     subparsers = parser.add_subparsers(dest="command")
@@ -180,6 +201,22 @@ def build_parser() -> argparse.ArgumentParser:
     debug_graph.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     debug_graph.set_defaults(func=run_debug_graph, prompt=True)
 
+    debug_preprocess = subparsers.add_parser("debug_preprocess_dir", help="Debug preprocessing on a folder.")
+    debug_preprocess.add_argument(
+        "--input-dir",
+        type=Path,
+        default=Path("FH_Circuit/Training_Data"),
+        help="Input folder with images to preprocess.",
+    )
+    debug_preprocess.add_argument(
+        "--output",
+        type=Path,
+        default=Path("./artifacts/debug_preprocess_dir"),
+        help="Output directory for debug artifacts.",
+    )
+    debug_preprocess.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
+    debug_preprocess.set_defaults(func=run_debug_preprocess_dir, prompt=False)
+
     return parser
 
 
@@ -189,7 +226,13 @@ def main() -> None:
     if args.command is None:
         choice = _prompt_choice(
             "Select mode",
-            {"train": "Train", "gui": "GUI", "predict": "Predict", "debug_graph": "Debug Graph"},
+            {
+                "train": "Train",
+                "gui": "GUI",
+                "predict": "Predict",
+                "debug_graph": "Debug Graph",
+                "debug_preprocess_dir": "Debug Preprocess Dir",
+            },
         )
         args = parser.parse_args([choice])
     args.func(args)

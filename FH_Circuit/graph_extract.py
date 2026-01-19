@@ -32,6 +32,7 @@ def extract_graph(
     debug_dir: Optional[Path] = None,
     debug_prefix: str = "sample",
     path_spacing: int = 8,
+    path_nodes: bool = True,
 ) -> GraphData:
     """Extract topology-based graph features from a cleaned binary image.
 
@@ -46,15 +47,24 @@ def extract_graph(
     node_pixel_to_index = _map_node_pixels(node_pixels)
 
     edges, edge_polylines = _trace_edges(skeleton, node_pixel_to_index)
-    (
-        dense_nodes,
-        dense_types,
-        dense_edges,
-        dense_polylines,
-        path_node_count,
-        segment_lengths,
-        curvature_proxy,
-    ) = _insert_path_nodes(node_coords, node_types, edges, edge_polylines, path_spacing)
+    if path_nodes:
+        (
+            dense_nodes,
+            dense_types,
+            dense_edges,
+            dense_polylines,
+            path_node_count,
+            segment_lengths,
+            curvature_proxy,
+        ) = _insert_path_nodes(node_coords, node_types, edges, edge_polylines, path_spacing)
+    else:
+        dense_nodes = node_coords
+        dense_types = node_types
+        dense_edges = edges
+        dense_polylines = edge_polylines
+        path_node_count = 0
+        segment_lengths = []
+        curvature_proxy = 0.0
     node_features = _build_node_features(dense_nodes, dense_types, dense_edges, skeleton)
     edge_features = _build_edge_features(dense_polylines, skeleton.shape)
     graph_features = _build_graph_features(

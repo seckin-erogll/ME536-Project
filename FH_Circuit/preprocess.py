@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from FH_Circuit.config import IMAGE_SIZE, MIN_AREA
+from FH_Circuit.graph_extract import extract_graph, render_graph_overlay
 
 _SKIMAGE_AVAILABLE = importlib.util.find_spec("skimage") is not None
 if _SKIMAGE_AVAILABLE:
@@ -22,6 +23,8 @@ class PreprocessResult:
     original: np.ndarray
     binarized: np.ndarray
     cleaned: np.ndarray
+    pruned: np.ndarray
+    wire_mask: np.ndarray
     final: np.ndarray
     bbox: Tuple[int, int, int, int]
 
@@ -35,6 +38,10 @@ def preprocess_image(
     debug_prefix: str = "sample",
     augment: bool = False,
     augment_seed: Optional[int] = None,
+    wire_border_margin: int = 4,
+    wire_min_len: float = 0.45,
+    wire_max_curv: float = 0.02,
+    wire_dilate_iters: int = 2,
 ) -> PreprocessResult:
     """Run preprocessing pipeline and return intermediate outputs."""
     original = _to_grayscale_uint8(image)
@@ -42,15 +49,25 @@ def preprocess_image(
     binarized = _binarize(denoised)
     cleaned = _morphology_cleanup(binarized)
     cleaned = _keep_largest_component(cleaned, min_area=min_area)
+    pruned, wire_mask = _prune_border_wires(
+        cleaned,
+        border_margin=wire_border_margin,
+        min_len=wire_min_len,
+        max_curv=wire_max_curv,
+        dilate_iters=wire_dilate_iters,
+    )
+    pruned = _keep_largest_component(pruned, min_area=min_area)
     if augment:
-        cleaned = _augment_binary(cleaned, seed=augment_seed)
+        pruned = _augment_binary(pruned, seed=augment_seed)
     if deskew:
-        cleaned = _deskew_binary(cleaned)
-    final, bbox = _crop_pad_resize(cleaned, image_size=image_size)
+        pruned = _deskew_binary(pruned)
+    final, bbox = _crop_pad_resize(pruned, image_size=image_size)
     result = PreprocessResult(
         original=original,
         binarized=binarized,
         cleaned=cleaned,
+        pruned=pruned,
+        wire_mask=wire_mask,
         final=final,
         bbox=bbox,
     )
@@ -302,4 +319,59 @@ def _save_debug(result: PreprocessResult, debug_dir: Path, prefix: str) -> None:
     Image.fromarray(result.original).save(debug_dir / f"{prefix}_original.png")
     Image.fromarray((result.binarized * 255).astype(np.uint8)).save(debug_dir / f"{prefix}_binarized.png")
     Image.fromarray((result.cleaned * 255).astype(np.uint8)).save(debug_dir / f"{prefix}_cleaned.png")
+    Image.fromarray((result.wire_mask * 255).astype(np.uint8)).save(debug_dir / f"{prefix}_wire_mask.png")
+    Image.fromarray((result.pruned * 255).astype(np.uint8)).save(debug_dir / f"{prefix}_pruned.png")
     Image.fromarray((result.final * 255).astype(np.uint8)).save(debug_dir / f"{prefix}_final.png")
+    if result.pruned.any():
+        graph = extract_graph(result.pruned, path_nodes=False)
+        render_graph_overlay(graph, debug_dir, f"{prefix}_graph_pruned")
+
+
+def _prune_border_wires(
+    cleaned: np.ndarray,
+    border_margin: int,
+    min_len: float,
+    max_curv: float,
+    dilate_iters: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Remove long straight edges that exit the border to isolate the symbol body."""
+    try:
+        graph = extract_graph(cleaned, path_nodes=False)
+    except Exception:
+        return cleaned, np.zeros_like(cleaned)
+    if graph.edges.size == 0:
+        return cleaned, np.zeros_like(cleaned)
+    height, width = cleaned.shape
+    wire_mask = np.zeros_like(cleaned, dtype=np.uint8)
+    max_dim = max(height, width)
+    for (u, v), polyline in zip(graph.edges, graph.edge_polylines):
+        if len(polyline) < 2:
+            continue
+        points = np.array(polyline, dtype=np.float32)
+        diffs = np.diff(points, axis=0)
+        lengths = np.linalg.norm(diffs, axis=1)
+        norm_len = float(lengths.sum()) / max_dim
+        angles = np.arctan2(diffs[:, 0], diffs[:, 1])
+        curvature = float(np.var(angles)) if angles.size > 1 else 0.0
+        u_coord = graph.nodes[int(u)]
+        v_coord = graph.nodes[int(v)]
+        if not (_is_border_node(u_coord, width, height, border_margin) or _is_border_node(v_coord, width, height, border_margin)):
+            continue
+        if norm_len < min_len or curvature > max_curv:
+            continue
+        for y, x in polyline:
+            if 0 <= y < height and 0 <= x < width:
+                wire_mask[int(y), int(x)] = 1
+    if wire_mask.sum() == 0:
+        return cleaned, wire_mask
+    for _ in range(max(1, dilate_iters)):
+        wire_mask = _binary_dilation(wire_mask)
+    pruned = cleaned.copy()
+    pruned[wire_mask > 0] = 0
+    pruned = _morphology_cleanup(pruned)
+    return pruned, wire_mask
+
+
+def _is_border_node(coord: Tuple[int, int], width: int, height: int, margin: int) -> bool:
+    y, x = int(coord[0]), int(coord[1])
+    return x <= margin or y <= margin or (width - 1 - x) <= margin or (height - 1 - y) <= margin

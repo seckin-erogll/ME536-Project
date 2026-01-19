@@ -61,7 +61,7 @@ python main.py gui --model-dir ./artifacts
 ### 5) Classify a saved image
 
 ```bash
-python main.py predict path/to/sketch.png --model-dir ./artifacts
+python main.py predict path/to/sketch.png --artifacts ./artifacts
 ```
 
 ### 6) Debug graph extraction
@@ -69,6 +69,15 @@ python main.py predict path/to/sketch.png --model-dir ./artifacts
 ```bash
 python main.py debug_graph path/to/sketch.png --output ./artifacts/debug_graph_one
 ```
+
+### 7) Debug preprocessing on a folder
+
+```bash
+python main.py debug_preprocess_dir --input-dir FH_Circuit/Training_Data --output ./artifacts/debug_preprocess_dir
+```
+
+Wire removal tuning is available in `preprocess.py` via `wire_border_margin`, `wire_min_len`,
+`wire_max_curv`, and `wire_dilate_iters` (increase `wire_min_len` if too much is removed).
 
 ## Dependencies
 
