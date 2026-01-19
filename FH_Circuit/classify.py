@@ -19,7 +19,7 @@ if __package__ is None:
 
 from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
 from FH_Circuit.data import AMBIGUOUS_COARSE_GROUPS, labels_for_coarse_group
-from FH_Circuit.model import ConvAutoencoder
+from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import extract_graph_features_from_binary, preprocess
 
 
@@ -46,7 +46,15 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     except TypeError:
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model = ConvAutoencoder(latent_dim=checkpoint["latent_dim"])
+    model_type = checkpoint.get("model_type", "autoencoder")
+    num_classes = checkpoint.get("num_classes", len(checkpoint["labels"]))
+    if model_type == "supervised":
+        model = SupervisedAutoencoder(
+            latent_dim=checkpoint["latent_dim"],
+            num_classes=num_classes,
+        )
+    else:
+        model = ConvAutoencoder(latent_dim=checkpoint["latent_dim"])
     model.load_state_dict(checkpoint["state_dict"])
     labels = checkpoint["labels"]
     feature_mean = checkpoint.get("feature_mean")
@@ -122,7 +130,11 @@ def classify_sketch(
     tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
     artifacts.coarse.model.eval()
     with torch.no_grad():
-        recon, latent = artifacts.coarse.model(tensor)
+        outputs = artifacts.coarse.model(tensor)
+        if len(outputs) == 2:
+            recon, latent = outputs
+        else:
+            recon, latent, _ = outputs
     recon_error = torch.mean((recon - tensor) ** 2).item()
     if recon_error > error_threshold:
         return "Novelty detected: unknown component."
@@ -137,7 +149,11 @@ def classify_sketch(
         fine_stage = artifacts.fine[coarse_label]
         fine_stage.model.eval()
         with torch.no_grad():
-            _, fine_latent = fine_stage.model(tensor)
+            fine_outputs = fine_stage.model(tensor)
+            if len(fine_outputs) == 2:
+                _, fine_latent = fine_outputs
+            else:
+                _, fine_latent, _ = fine_outputs
         normalized_fine_latent = fine_stage.latent_scaler.transform(fine_latent.cpu().numpy())
         fine_features = (graph_features - fine_stage.feature_mean) / fine_stage.feature_std
         fine_combined = np.concatenate([normalized_fine_latent, fine_features[None, :]], axis=1)

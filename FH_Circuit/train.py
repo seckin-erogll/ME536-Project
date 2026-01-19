@@ -28,7 +28,7 @@ from FH_Circuit.data import (
     resolve_coarse_label,
 )
 from FH_Circuit.dataset import SymbolDataset
-from FH_Circuit.model import ConvAutoencoder
+from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import extract_graph_features, preprocess
 
 
@@ -52,22 +52,28 @@ def train_autoencoder(
     batch_size: int = 32,
     latent_dim: int = 32,
     log_interval: int = 0,
-) -> ConvAutoencoder:
+    num_classes: int = 1,
+    class_loss_weight: float = 0.3,
+) -> SupervisedAutoencoder:
     device = resolve_device()
     print(f"Training on device: {describe_device(device)}")
     print(f"Dataset size: {len(dataset)} | Batch size: {batch_size} | Latent dim: {latent_dim}")
-    model = ConvAutoencoder(latent_dim=latent_dim).to(device)
+    model = SupervisedAutoencoder(latent_dim=latent_dim, num_classes=num_classes).to(device)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.MSELoss()
+    recon_criterion = nn.MSELoss()
+    class_criterion = nn.CrossEntropyLoss()
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
         start = time.perf_counter()
-        for step, (inputs, _) in enumerate(loader, start=1):
+        for step, (inputs, labels) in enumerate(loader, start=1):
             inputs = inputs.to(device)
-            recon, _ = model(inputs)
-            loss = criterion(recon, inputs)
+            labels = labels.to(device)
+            recon, _, logits = model(inputs)
+            recon_loss = recon_criterion(recon, inputs)
+            class_loss = class_criterion(logits, labels)
+            loss = recon_loss + class_loss_weight * class_loss
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -111,7 +117,11 @@ def extract_latents(model, dataset) -> np.ndarray:
     with torch.no_grad():
         for image, label in dataset:
             image = image.to(device)
-            _, latent = model(image.unsqueeze(0))
+            outputs = model(image.unsqueeze(0))
+            if len(outputs) == 2:
+                _, latent = outputs
+            else:
+                _, latent, _ = outputs
             latents.append(latent.detach().cpu())
             sample_labels.append(int(label))
 
@@ -146,7 +156,7 @@ def save_reconstructions(
 
 def save_artifacts(
     output_dir: Path,
-    model: ConvAutoencoder,
+    model: nn.Module,
     pca: PCA,
     classifier: SVC,
     latent_dim: int,
@@ -154,6 +164,7 @@ def save_artifacts(
     feature_mean: np.ndarray,
     feature_std: np.ndarray,
     latent_scaler: StandardScaler,
+    model_type: str,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -163,6 +174,8 @@ def save_artifacts(
             "labels": labels,
             "feature_mean": feature_mean,
             "feature_std": feature_std,
+            "model_type": model_type,
+            "num_classes": len(labels),
         },
         output_dir / "autoencoder.pt",
     )
@@ -181,9 +194,17 @@ def train_stage(
     epochs: int,
     batch_size: int,
     latent_dim: int,
+    class_loss_weight: float,
 ) -> None:
     dataset = SymbolDataset(samples, labels)
-    model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
+    model = train_autoencoder(
+        dataset,
+        epochs=epochs,
+        batch_size=batch_size,
+        latent_dim=latent_dim,
+        num_classes=len(labels),
+        class_loss_weight=class_loss_weight,
+    )
     latents, sample_labels = extract_latents(model, dataset)
     latent_scaler = StandardScaler()
     latents_norm = latent_scaler.fit_transform(latents)
@@ -205,6 +226,7 @@ def train_stage(
         feature_mean,
         feature_std,
         latent_scaler,
+        model_type="supervised",
     )
     print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
     save_reconstructions(model, samples, output_dir)
@@ -217,6 +239,7 @@ def train_pipeline(
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
+    class_loss_weight: float = 0.3,
 ) -> None:
     coarse_labels = list_coarse_labels(labels)
     coarse_samples = [
@@ -231,6 +254,7 @@ def train_pipeline(
         epochs=epochs,
         batch_size=batch_size,
         latent_dim=latent_dim,
+        class_loss_weight=class_loss_weight,
     )
     for group in sorted(AMBIGUOUS_COARSE_GROUPS):
         group_labels = labels_for_coarse_group(group)
@@ -248,4 +272,5 @@ def train_pipeline(
             epochs=epochs,
             batch_size=batch_size,
             latent_dim=latent_dim,
+            class_loss_weight=class_loss_weight,
         )

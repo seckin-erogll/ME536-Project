@@ -39,3 +39,40 @@ class ConvAutoencoder(nn.Module):
         latent = self.encoder(x)
         recon = self.decoder(latent)
         return recon, latent
+
+
+class SupervisedAutoencoder(nn.Module):
+    def __init__(self, latent_dim: int = 32, num_classes: int = 1):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, latent_dim),
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 64 * 8 * 8),
+            nn.ReLU(),
+            nn.Unflatten(1, (64, 8, 8)),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, kernel_size=4, stride=2, padding=1),
+            nn.Sigmoid(),
+        )
+        self.classifier_head = nn.Linear(latent_dim, num_classes)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        latent = self.encoder(x)
+        recon = self.decoder(latent)
+        logits = self.classifier_head(latent)
+        return recon, latent, logits
