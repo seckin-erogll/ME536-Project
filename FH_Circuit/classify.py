@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -23,8 +23,12 @@ def resolve_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_artifacts(model_dir: Path) -> Tuple[HybridClassifier, Dict[str, int], List[str], dict, torch.Tensor]:
-    checkpoint = torch.load(model_dir / "model.pt", map_location="cpu")
+def load_artifacts(
+    model_dir: Path,
+    model_path: Optional[Path] = None,
+) -> Tuple[HybridClassifier, Dict[str, int], List[str], dict, torch.Tensor]:
+    checkpoint_path = model_path or (model_dir / "model.pt")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
     labels: List[str] = checkpoint["labels"]
     model = HybridClassifier(
         num_classes=len(labels),

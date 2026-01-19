@@ -81,14 +81,15 @@ def run_gui(args: argparse.Namespace) -> None:
 
 
 def run_predict(args: argparse.Namespace) -> None:
-    if args.prompt and args.image is None:
+    if args.prompt and args.image is None and args.image_path is None:
         args.image = _prompt_file_path("Image path")
     if args.prompt:
-        args.model_dir = _prompt_path("Model directory", args.model_dir)
-    if args.image is None:
-        raise ValueError("Image path is required for classification.")
-    model, _, labels, thresholds, prototypes = load_artifacts(args.model_dir)
-    image = np.array(Image.open(args.image))
+        args.artifacts = _prompt_path("Artifacts directory", args.artifacts)
+    image_path = args.image_path or args.image
+    if image_path is None:
+        raise ValueError("Image path is required for prediction.")
+    model, _, labels, thresholds, prototypes = load_artifacts(args.artifacts, model_path=args.weights)
+    image = np.array(Image.open(image_path))
     label_idx, details = predict_symbol(model, image, prototypes, thresholds)
     if label_idx is None:
         print(
@@ -157,7 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     predict = subparsers.add_parser("predict", help="Predict a symbol label from an image.")
     predict.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
-    predict.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
+    predict.add_argument("--image", type=Path, dest="image_path", help="Path to the image file.")
+    predict.add_argument("--weights", type=Path, default=None, help="Path to model.pt weights.")
+    predict.add_argument(
+        "--artifacts",
+        type=Path,
+        default=Path("./artifacts"),
+        help="Artifacts folder with thresholds/prototypes/class_map.",
+    )
     predict.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     predict.set_defaults(func=run_predict, prompt=True)
 

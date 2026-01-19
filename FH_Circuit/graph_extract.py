@@ -31,6 +31,7 @@ def extract_graph(
     cleaned: np.ndarray,
     debug_dir: Optional[Path] = None,
     debug_prefix: str = "sample",
+    path_spacing: int = 8,
 ) -> GraphData:
     """Extract topology-based graph features from a cleaned binary image.
 
@@ -45,19 +46,36 @@ def extract_graph(
     node_pixel_to_index = _map_node_pixels(node_pixels)
 
     edges, edge_polylines = _trace_edges(skeleton, node_pixel_to_index)
-    node_features = _build_node_features(node_coords, node_types, node_pixels, edges, skeleton)
-    edge_features = _build_edge_features(edge_polylines, skeleton.shape)
-    graph_features = _build_graph_features(node_types, edges, edge_features, skeleton)
+    (
+        dense_nodes,
+        dense_types,
+        dense_edges,
+        dense_polylines,
+        path_node_count,
+        segment_lengths,
+        curvature_proxy,
+    ) = _insert_path_nodes(node_coords, node_types, edges, edge_polylines, path_spacing)
+    node_features = _build_node_features(dense_nodes, dense_types, dense_edges, skeleton)
+    edge_features = _build_edge_features(dense_polylines, skeleton.shape)
+    graph_features = _build_graph_features(
+        dense_types,
+        dense_edges,
+        edge_features,
+        skeleton,
+        path_node_count=path_node_count,
+        segment_lengths=segment_lengths,
+        curvature_proxy=curvature_proxy,
+    )
 
     graph = GraphData(
-        nodes=node_coords,
-        edges=edges,
+        nodes=dense_nodes,
+        edges=dense_edges,
         node_features=node_features,
         edge_features=edge_features,
         graph_features=graph_features,
         skeleton=skeleton,
-        node_types=node_types,
-        edge_polylines=edge_polylines,
+        node_types=dense_types,
+        edge_polylines=dense_polylines,
     )
     if debug_dir is not None:
         render_graph_overlay(graph, debug_dir, debug_prefix)
@@ -239,6 +257,85 @@ def _trace_edges(
     return np.array(edges, dtype=np.int64), polylines
 
 
+def _insert_path_nodes(
+    node_coords: np.ndarray,
+    node_types: List[str],
+    edges: np.ndarray,
+    polylines: List[List[Tuple[int, int]]],
+    spacing: int,
+) -> Tuple[
+    np.ndarray,
+    List[str],
+    np.ndarray,
+    List[List[Tuple[int, int]]],
+    int,
+    List[float],
+    float,
+]:
+    # Sample path nodes every K pixels to densify the graph along skeleton paths.
+    if edges.size == 0:
+        return node_coords, node_types, edges, polylines, 0, [], 0.0
+    new_nodes: List[Tuple[int, int]] = [tuple(coord) for coord in node_coords]
+    new_types: List[str] = list(node_types)
+    new_edges: List[Tuple[int, int]] = []
+    new_polylines: List[List[Tuple[int, int]]] = []
+    path_node_count = 0
+    segment_lengths: List[float] = []
+    curvature_samples: List[float] = []
+
+    for edge_idx, (u, v) in enumerate(edges):
+        polyline = polylines[edge_idx]
+        if len(polyline) < 2:
+            continue
+        points = np.array(polyline, dtype=np.float32)
+        diffs = np.diff(points, axis=0)
+        lengths = np.linalg.norm(diffs, axis=1)
+        cumulative = np.concatenate([[0.0], np.cumsum(lengths)])
+        total_len = cumulative[-1]
+        if total_len <= spacing:
+            new_edges.append((int(u), int(v)))
+            new_polylines.append(polyline)
+            segment_lengths.append(float(total_len))
+            continue
+        sample_positions = np.arange(spacing, total_len, spacing)
+        prev_node = int(u)
+        for pos in sample_positions:
+            idx = np.searchsorted(cumulative, pos) - 1
+            idx = max(0, min(idx, len(diffs) - 1))
+            t = (pos - cumulative[idx]) / max(1e-6, lengths[idx])
+            interp = points[idx] + t * diffs[idx]
+            new_nodes.append((int(round(interp[0])), int(round(interp[1]))))
+            new_types.append("path")
+            curr_node = len(new_nodes) - 1
+            new_edges.append((prev_node, curr_node))
+            new_polylines.append(
+                [
+                    (int(points[idx][0]), int(points[idx][1])),
+                    (int(points[idx + 1][0]), int(points[idx + 1][1])),
+                ]
+            )
+            segment_lengths.append(float(spacing))
+            prev_node = curr_node
+            path_node_count += 1
+        new_edges.append((prev_node, int(v)))
+        new_polylines.append(polyline)
+        segment_lengths.append(float(max(1.0, total_len - sample_positions[-1])))
+        if diffs.shape[0] > 1:
+            angles = np.arctan2(diffs[:, 0], diffs[:, 1])
+            curvature_samples.append(float(np.var(angles)))
+
+    curvature_proxy = float(np.mean(curvature_samples)) if curvature_samples else 0.0
+    return (
+        np.array(new_nodes, dtype=np.int32),
+        new_types,
+        np.array(new_edges, dtype=np.int64),
+        new_polylines,
+        path_node_count,
+        segment_lengths,
+        curvature_proxy,
+    )
+
+
 def _walk_edge(
     skeleton: np.ndarray,
     node_pixel_to_index: Dict[Tuple[int, int], int],
@@ -282,7 +379,6 @@ def _neighbor_coords(pixel: Tuple[int, int], shape: Tuple[int, int]) -> List[Tup
 def _build_node_features(
     node_coords: np.ndarray,
     node_types: List[str],
-    node_pixels: List[List[Tuple[int, int]]],
     edges: np.ndarray,
     skeleton: np.ndarray,
 ) -> np.ndarray:
@@ -297,8 +393,7 @@ def _build_node_features(
         degree = degrees[idx]
         endpoint = 1.0 if node_type == "endpoint" else 0.0
         junction = 1.0 if node_type == "junction" else 0.0
-        anchor_pixel = node_pixels[idx][0] if node_pixels[idx] else tuple(coord)
-        direction = _local_direction(anchor_pixel, skeleton)
+        direction = _local_direction((int(y), int(x)), skeleton)
         features.append([norm_x, norm_y, degree, endpoint, junction, direction])
     return np.array(features, dtype=np.float32)
 
@@ -354,6 +449,9 @@ def _build_graph_features(
     edges: np.ndarray,
     edge_features: np.ndarray,
     skeleton: np.ndarray,
+    path_node_count: int,
+    segment_lengths: List[float],
+    curvature_proxy: float,
 ) -> np.ndarray:
     num_nodes = len(node_types)
     num_edges = int(edges.shape[0])
@@ -378,9 +476,13 @@ def _build_graph_features(
     cycle_indicator = num_edges - num_nodes + components
     endpoint_count = float(node_types.count("endpoint"))
     junction_count = float(node_types.count("junction"))
+    avg_segment_length = float(np.mean(segment_lengths)) if segment_lengths else 0.0
     graph_feat = np.concatenate(
         [
-            np.array([num_nodes, num_edges], dtype=np.float32),
+            np.array(
+                [num_nodes, num_edges, float(path_node_count), avg_segment_length, curvature_proxy],
+                dtype=np.float32,
+            ),
             degree_hist,
             length_stats,
             angle_hist,
@@ -421,6 +523,14 @@ def render_graph_overlay(graph: GraphData, output_dir: Path, prefix: str) -> Non
         draw.line(points, fill=(80, 180, 255), width=1)
     for coord, node_type in zip(graph.nodes, graph.node_types):
         y, x = coord
-        color = (255, 80, 80) if node_type == "endpoint" else (80, 255, 120)
-        draw.ellipse((x - 2, y - 2, x + 2, y + 2), outline=color, width=2)
+        if node_type == "endpoint":
+            color = (255, 80, 80)
+            radius = 2
+        elif node_type == "junction":
+            color = (80, 255, 120)
+            radius = 2
+        else:
+            color = (255, 60, 60)
+            radius = 1
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=color, width=2)
     image.save(output_dir / f"{prefix}_graph.png")

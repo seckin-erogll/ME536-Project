@@ -33,6 +33,8 @@ def preprocess_image(
     deskew: bool = False,
     debug_dir: Optional[Path] = None,
     debug_prefix: str = "sample",
+    augment: bool = False,
+    augment_seed: Optional[int] = None,
 ) -> PreprocessResult:
     """Run preprocessing pipeline and return intermediate outputs."""
     original = _to_grayscale_uint8(image)
@@ -40,6 +42,8 @@ def preprocess_image(
     binarized = _binarize(denoised)
     cleaned = _morphology_cleanup(binarized)
     cleaned = _keep_largest_component(cleaned, min_area=min_area)
+    if augment:
+        cleaned = _augment_binary(cleaned, seed=augment_seed)
     if deskew:
         cleaned = _deskew_binary(cleaned)
     final, bbox = _crop_pad_resize(cleaned, image_size=image_size)
@@ -73,8 +77,13 @@ def _median_denoise(image: np.ndarray) -> np.ndarray:
 def _binarize(image: np.ndarray) -> np.ndarray:
     threshold = _otsu_threshold(image)
     binary = (image > threshold).astype(np.uint8)
+    return _auto_invert(binary)
+
+
+def _auto_invert(binary: np.ndarray) -> np.ndarray:
+    # Ensure strokes are foreground (1) by comparing foreground ratio.
     if binary.mean() > 0.5:
-        binary = 1 - binary
+        return 1 - binary
     return binary
 
 
@@ -110,38 +119,21 @@ def _morphology_cleanup(binary: np.ndarray) -> np.ndarray:
         selem = morphology.footprint_rectangle((3, 3))
         opened = morphology.opening(binary.astype(bool), selem)
         closed = morphology.closing(opened, selem)
-        cleaned = morphology.remove_small_objects(closed, max_size=5)
+        cleaned = morphology.remove_small_objects(closed, min_size=5)
         return cleaned.astype(np.uint8)
-    opened = _binary_opening(binary)
-    closed = _binary_closing(opened)
-    return closed.astype(np.uint8)
+    # Safe fallback: avoid aggressive erosion that would destroy thin strokes.
+    cleaned = _remove_tiny_components(binary, min_size=5)
+    return cleaned.astype(np.uint8)
 
 
-def _binary_opening(binary: np.ndarray) -> np.ndarray:
-    return _binary_dilation(_binary_erosion(binary))
-
-
-def _binary_closing(binary: np.ndarray) -> np.ndarray:
-    return _binary_erosion(_binary_dilation(binary))
-
-
-def _binary_erosion(binary: np.ndarray) -> np.ndarray:
-    padded = np.pad(binary, 1, mode="constant")
+def _remove_tiny_components(binary: np.ndarray, min_size: int) -> np.ndarray:
+    labels, counts = _connected_components(binary)
+    if not counts:
+        return binary
     output = np.zeros_like(binary)
-    for i in range(output.shape[0]):
-        for j in range(output.shape[1]):
-            region = padded[i : i + 3, j : j + 3]
-            output[i, j] = 1 if region.sum() == 9 else 0
-    return output
-
-
-def _binary_dilation(binary: np.ndarray) -> np.ndarray:
-    padded = np.pad(binary, 1, mode="constant")
-    output = np.zeros_like(binary)
-    for i in range(output.shape[0]):
-        for j in range(output.shape[1]):
-            region = padded[i : i + 3, j : j + 3]
-            output[i, j] = 1 if region.sum() > 0 else 0
+    for label, count in counts.items():
+        if count >= min_size:
+            output[labels == label] = 1
     return output
 
 
@@ -237,6 +229,72 @@ def _crop_pad_resize(binary: np.ndarray, image_size: int) -> Tuple[np.ndarray, T
     )
     final = (np.array(resized) > 0).astype(np.float32)
     return final, (int(x_min), int(y_min), int(x_max), int(y_max))
+
+
+def _augment_binary(binary: np.ndarray, seed: Optional[int]) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    augmented = binary.copy()
+    # Stroke thickness augmentation simulates pen width differences.
+    augmented = _random_thickness(augmented, rng)
+    augmented = _random_rotate(augmented, rng, max_degrees=10)
+    augmented = _random_translate(augmented, rng, max_shift=3)
+    return augmented
+
+
+def _random_thickness(binary: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    mode = rng.choice(["none", "dilate", "erode"], p=[0.5, 0.25, 0.25])
+    if mode == "none":
+        return binary
+    if _SKIMAGE_AVAILABLE:
+        selem = morphology.footprint_rectangle((3, 3))
+        if mode == "dilate":
+            return morphology.dilation(binary.astype(bool), selem).astype(np.uint8)
+        return morphology.erosion(binary.astype(bool), selem).astype(np.uint8)
+    if mode == "dilate":
+        return _binary_dilation(binary)
+    return _binary_soft_erosion(binary)
+
+
+def _binary_dilation(binary: np.ndarray) -> np.ndarray:
+    padded = np.pad(binary, 1, mode="constant")
+    output = np.zeros_like(binary)
+    for i in range(output.shape[0]):
+        for j in range(output.shape[1]):
+            region = padded[i : i + 3, j : j + 3]
+            output[i, j] = 1 if region.sum() > 0 else 0
+    return output
+
+
+def _binary_soft_erosion(binary: np.ndarray, threshold: int = 3) -> np.ndarray:
+    padded = np.pad(binary, 1, mode="constant")
+    output = np.zeros_like(binary)
+    for i in range(output.shape[0]):
+        for j in range(output.shape[1]):
+            region = padded[i : i + 3, j : j + 3]
+            output[i, j] = 1 if region.sum() >= threshold else 0
+    return output
+
+
+def _random_rotate(binary: np.ndarray, rng: np.random.Generator, max_degrees: float) -> np.ndarray:
+    angle = float(rng.uniform(-max_degrees, max_degrees))
+    rotated = Image.fromarray((binary * 255).astype(np.uint8)).rotate(
+        angle,
+        resample=Image.BILINEAR,
+        fillcolor=0,
+    )
+    return (np.array(rotated) > 0).astype(np.uint8)
+
+
+def _random_translate(binary: np.ndarray, rng: np.random.Generator, max_shift: int) -> np.ndarray:
+    shift_x = int(rng.integers(-max_shift, max_shift + 1))
+    shift_y = int(rng.integers(-max_shift, max_shift + 1))
+    padded = np.pad(binary, max_shift, mode="constant")
+    start_x = max_shift + shift_x
+    start_y = max_shift + shift_y
+    end_x = start_x + binary.shape[0]
+    end_y = start_y + binary.shape[1]
+    shifted = padded[start_x:end_x, start_y:end_y]
+    return shifted.astype(np.uint8)
 
 
 def _save_debug(result: PreprocessResult, debug_dir: Path, prefix: str) -> None:

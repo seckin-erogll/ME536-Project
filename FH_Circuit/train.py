@@ -19,7 +19,6 @@ if __package__ is None:
 
 from FH_Circuit.config import (
     CONFIDENCE_QUANTILE,
-    DEFAULT_SEED,
     DISTANCE_QUANTILE,
     GRAPH_EMBEDDING_DIM,
     IMAGE_EMBEDDING_DIM,
@@ -29,6 +28,10 @@ from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.graph_extract import extract_graph
 from FH_Circuit.model import HybridClassifier
 from FH_Circuit.preprocess import preprocess_image
+
+
+DEFAULT_SEED = 0
+DEFAULT_VAL_FRAC = 0.15
 
 
 def set_seed(seed: int = DEFAULT_SEED) -> None:
@@ -52,29 +55,69 @@ def describe_device(device: torch.device) -> str:
     return device.type
 
 
-def split_indices(count: int, val_ratio: float = 0.2, seed: int = DEFAULT_SEED) -> Tuple[List[int], List[int]]:
-    indices = list(range(count))
+def split_indices_by_label(
+    samples: List[Sample],
+    labels: List[str],
+    val_ratio: float = DEFAULT_VAL_FRAC,
+    seed: int = DEFAULT_SEED,
+) -> Tuple[List[int], List[int]]:
+    # Stratified split to keep per-class balance in train/val.
     rng = random.Random(seed)
-    rng.shuffle(indices)
-    split = int(count * (1 - val_ratio))
-    return indices[:split], indices[split:]
+    label_to_indices: Dict[str, List[int]] = {label: [] for label in labels}
+    for idx, sample in enumerate(samples):
+        label_to_indices[sample.label].append(idx)
+    train_indices: List[int] = []
+    val_indices: List[int] = []
+    for label, indices in label_to_indices.items():
+        rng.shuffle(indices)
+        if not indices:
+            continue
+        split = max(1, int(len(indices) * (1 - val_ratio)))
+        if len(indices) == 1:
+            train_indices.extend(indices)
+            continue
+        train_indices.extend(indices[:split])
+        val_indices.extend(indices[split:])
+    rng.shuffle(train_indices)
+    rng.shuffle(val_indices)
+    return train_indices, val_indices
+
+
+def log_split_counts(
+    samples: List[Sample],
+    train_indices: List[int],
+    val_indices: List[int],
+    labels: List[str],
+) -> None:
+    train_counts = {label: 0 for label in labels}
+    val_counts = {label: 0 for label in labels}
+    for idx in train_indices:
+        train_counts[samples[idx].label] += 1
+    for idx in val_indices:
+        val_counts[samples[idx].label] += 1
+    print("Train/Val class counts:")
+    for label in labels:
+        print(f"  - {label}: train={train_counts[label]} val={val_counts[label]}")
 
 
 def train_classifier(
-    dataset: SymbolDataset,
+    train_dataset: SymbolDataset,
+    val_dataset: SymbolDataset,
     labels: List[str],
+    samples: List[Sample],
     output_dir: Path,
     epochs: int = 50,
     batch_size: int = 32,
     log_interval: int = 20,
-) -> Dict[str, List[float]]:
+) -> Tuple[Dict[str, List[float]], List[int], List[int]]:
     device = resolve_device()
     print(f"Training on device: {describe_device(device)}")
-    print(f"Dataset size: {len(dataset)} | Batch size: {batch_size}")
+    print(f"Dataset size: {len(train_dataset)} | Batch size: {batch_size}")
 
-    train_indices, val_indices = split_indices(len(dataset))
-    train_set = Subset(dataset, train_indices)
-    val_set = Subset(dataset, val_indices)
+    train_indices, val_indices = split_indices_by_label(samples, labels)
+    log_split_counts(samples, train_indices, val_indices, labels)
+    train_set = Subset(train_dataset, train_indices)
+    val_set = Subset(val_dataset, val_indices)
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
@@ -138,7 +181,7 @@ def train_classifier(
             f"Train Acc {train_acc:.3f} | Val Loss {val_loss:.4f} | Val Acc {val_acc:.3f} | {duration:.1f}s"
         )
 
-        save_epoch_debug(dataset, output_dir / "debug_preprocess", output_dir / "debug_graph", epoch)
+        save_epoch_debug(train_dataset, output_dir / "debug_preprocess", output_dir / "debug_graph", epoch)
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
@@ -147,7 +190,7 @@ def train_classifier(
     with (output_dir / "train_metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
 
-    return metrics
+    return metrics, train_indices, val_indices
 
 
 def evaluate(
@@ -179,7 +222,7 @@ def save_epoch_debug(
     preprocess_dir: Path,
     graph_dir: Path,
     epoch: int,
-    max_samples: int = 3,
+    max_samples: int = 8,
 ) -> None:
     for idx in range(min(max_samples, len(dataset))):
         sample = dataset.samples[idx]
@@ -255,12 +298,20 @@ def train_pipeline(
     batch_size: int = 32,
 ) -> None:
     set_seed()
-    dataset = SymbolDataset(samples, labels)
-    metrics = train_classifier(dataset, labels, output_dir, epochs=epochs, batch_size=batch_size)
+    train_dataset = SymbolDataset(samples, labels, train=True, augment_seed=DEFAULT_SEED)
+    val_dataset = SymbolDataset(samples, labels, train=False, augment_seed=DEFAULT_SEED)
+    metrics, train_indices, val_indices = train_classifier(
+        train_dataset,
+        val_dataset,
+        labels,
+        samples,
+        output_dir,
+        epochs=epochs,
+        batch_size=batch_size,
+    )
 
-    train_indices, val_indices = split_indices(len(dataset))
-    train_set = Subset(dataset, train_indices)
-    val_set = Subset(dataset, val_indices)
+    train_set = Subset(train_dataset, train_indices)
+    val_set = Subset(val_dataset, val_indices)
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 

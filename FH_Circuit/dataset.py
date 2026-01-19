@@ -14,9 +14,18 @@ from FH_Circuit.preprocess import preprocess_image
 
 
 class SymbolDataset(Dataset):
-    def __init__(self, samples: List[Sample], labels: List[str], deskew: bool = False):
+    def __init__(
+        self,
+        samples: List[Sample],
+        labels: List[str],
+        deskew: bool = False,
+        train: bool = False,
+        augment_seed: int = 0,
+    ):
         self.samples = samples
         self.deskew = deskew
+        self.train = train
+        self.augment_seed = augment_seed
         self.label_to_index: Dict[str, int] = {label: idx for idx, label in enumerate(labels)}
 
     def __len__(self) -> int:
@@ -24,7 +33,12 @@ class SymbolDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int]:
         sample = self.samples[idx]
-        preprocess_result = preprocess_image(sample.image, deskew=self.deskew)
+        preprocess_result = preprocess_image(
+            sample.image,
+            deskew=self.deskew,
+            augment=self.train,
+            augment_seed=self.augment_seed + idx,
+        )
         graph = extract_graph(preprocess_result.cleaned)
         image_tensor = torch.from_numpy(preprocess_result.final).unsqueeze(0)
         graph_tensor = torch.from_numpy(graph.graph_features)
