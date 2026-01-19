@@ -91,8 +91,11 @@ def run_gui(args: argparse.Namespace) -> None:
     launch_gui(args.model_dir, args.dataset_dir)
 
 
-def run_circuit_gui(_args: argparse.Namespace) -> None:
-    launch_circuit_gui()
+def run_circuit_gui(args: argparse.Namespace) -> None:
+    if args.prompt:
+        print("Enter Circuit GUI parameters (press Enter to accept defaults).")
+        args.model_dir = _prompt_path("Model directory", args.model_dir)
+    launch_circuit_gui(args.model_dir)
 
 
 def run_classify(args: argparse.Namespace) -> None:
@@ -152,7 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
     gui.set_defaults(func=run_gui, prompt=True)
 
     circuit_gui = subparsers.add_parser("circuit_gui", help="Launch the circuit drawing GUI.")
-    circuit_gui.set_defaults(func=run_circuit_gui)
+    circuit_gui.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
+    circuit_gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
+    circuit_gui.set_defaults(func=run_circuit_gui, prompt=True)
 
     classify = subparsers.add_parser("classify", help="Classify a sketch image.")
     classify.add_argument("image", type=Path, nargs="?", help="Path to the image file.")

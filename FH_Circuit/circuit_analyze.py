@@ -21,7 +21,6 @@ from FH_Circuit.graph_extract import (
     polyline_curvature_angles,
     skeletonize_image,
 )
-from FH_Circuit.preprocess import binarize_image
 
 _SKIMAGE_AVAILABLE = importlib.util.find_spec("skimage") is not None
 if _SKIMAGE_AVAILABLE:
@@ -49,7 +48,7 @@ def analyze_circuit(
     params = params or CircuitParams()
     gray = _ensure_grayscale(image)
     smoothed = _denoise(gray)
-    binary = binarize_image(smoothed)
+    binary = _binarize_image(smoothed)
     binary = _binary_close(binary, radius=1)
 
     skeleton = skeletonize_image(binary)
@@ -106,6 +105,8 @@ def serialize_analysis(result: dict[str, Any], include_crops: bool = False) -> d
             "rotation_angle_deg": float(candidate["rotation_angle_deg"]),
             "terminals": [serialize_point(p) for p in candidate["terminals"]],
         }
+        if "label" in candidate and candidate["label"] is not None:
+            entry["label"] = candidate["label"]
         if include_crops and "crop" in candidate:
             entry["crop"] = candidate["crop"].astype(int).tolist()
         symbols.append(entry)
@@ -154,6 +155,41 @@ def _denoise(image: np.ndarray) -> np.ndarray:
     pil_image = Image.fromarray(image)
     blurred = pil_image.filter(ImageFilter.GaussianBlur(radius=0.8))
     return np.array(blurred)
+
+
+def _binarize_image(image: np.ndarray) -> np.ndarray:
+    threshold = _threshold_otsu(image)
+    binary = (image > threshold).astype(np.uint8)
+    if binary.mean() > 0.5:
+        binary = 1 - binary
+    return binary
+
+
+def _threshold_otsu(image: np.ndarray) -> float:
+    if _SKIMAGE_AVAILABLE:
+        return float(filters.threshold_otsu(image))
+    hist, _ = np.histogram(image.ravel(), bins=256)
+    total = image.size
+    sum_total = np.dot(hist, np.arange(256))
+    sum_b = 0.0
+    weight_b = 0.0
+    max_between = 0.0
+    threshold = 0
+    for i in range(256):
+        weight_b += hist[i]
+        if weight_b == 0:
+            continue
+        weight_f = total - weight_b
+        if weight_f == 0:
+            break
+        sum_b += i * hist[i]
+        mean_b = sum_b / weight_b
+        mean_f = (sum_total - sum_b) / weight_f
+        between = weight_b * weight_f * (mean_b - mean_f) ** 2
+        if between > max_between:
+            max_between = between
+            threshold = i
+    return float(threshold)
 
 
 def _binary_close(binary: np.ndarray, radius: int) -> np.ndarray:

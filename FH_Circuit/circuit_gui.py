@@ -11,10 +11,17 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from FH_Circuit.circuit_analyze import analyze_circuit, serialize_analysis
+from FH_Circuit.classify import classify_sketch, load_artifacts
 
 
 class CircuitDrawGUI:
-    def __init__(self, canvas_width: int = 900, canvas_height: int = 600) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        canvas_width: int = 900,
+        canvas_height: int = 600,
+    ) -> None:
+        self.artifacts = load_artifacts(model_dir)
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
         self.root = tk.Tk()
@@ -114,6 +121,7 @@ class CircuitDrawGUI:
     def on_analyze(self) -> None:
         sketch = np.array(self.image)
         self.analysis_result = analyze_circuit(sketch, debug_dir=self.output_dir)
+        self._classify_candidates()
         self.draw_overlays()
         serialized = serialize_analysis(self.analysis_result, include_crops=False)
         self._update_details(json.dumps(serialized, indent=2))
@@ -129,6 +137,16 @@ class CircuitDrawGUI:
                 self.canvas.create_rectangle(
                     x0, y0, x1, y1, outline="yellow", width=2, tags="overlay"
                 )
+                label = candidate.get("label")
+                if label:
+                    self.canvas.create_text(
+                        x0 + 4,
+                        y0 - 8,
+                        text=label,
+                        fill="white",
+                        anchor="nw",
+                        tags="overlay",
+                    )
         if self.show_terminals.get():
             for candidate in self.analysis_result.get("symbol_candidates", []):
                 for x, y in candidate["terminals"]:
@@ -154,10 +172,25 @@ class CircuitDrawGUI:
         self.details_text.insert(tk.END, text)
         self.details_text.configure(state="disabled")
 
+    def _classify_candidates(self) -> None:
+        if not self.analysis_result:
+            return
+        for candidate in self.analysis_result.get("symbol_candidates", []):
+            x0, y0, x1, y1 = candidate["bbox"]
+            crop = self.image.crop((x0, y0, x1 + 1, y1 + 1))
+            resized = crop.resize((64, 64), resample=Image.BILINEAR)
+            sketch = np.array(resized)
+            try:
+                result = classify_sketch(self.artifacts, sketch)
+            except ValueError as exc:
+                result = str(exc)
+            label = result.replace("Detected: ", "", 1) if result.startswith("Detected: ") else result
+            candidate["label"] = label
+
     def run(self) -> None:
         self.root.mainloop()
 
 
-def launch_circuit_gui() -> None:
-    app = CircuitDrawGUI()
+def launch_circuit_gui(model_dir: Path) -> None:
+    app = CircuitDrawGUI(model_dir=model_dir)
     app.run()

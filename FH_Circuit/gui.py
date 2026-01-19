@@ -11,7 +11,6 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
-from FH_Circuit.preprocess import binarize_image
 
 ROTATED_THRESHOLD_DEG = 10.0
 
@@ -141,8 +140,7 @@ class SketchGUI:
     def _update_overlays(self) -> None:
         self.canvas.delete("overlay")
         image_array = np.array(self.image)
-        binary = binarize_image(image_array)
-        coords = np.column_stack(np.where(binary > 0))
+        coords = np.column_stack(np.where(image_array > 0))
         if coords.size == 0:
             self._update_details("No foreground detected.")
             return
