@@ -49,11 +49,19 @@ def detect_component_regions(
         rr, cc = draw_line(int(y0), int(x0), int(y1), int(x1))
         wire_mask[rr, cc] = True
     if wire_mask.any():
-        wire_mask = morphology.binary_dilation(wire_mask, morphology.disk(line_thickness))
+        wire_mask = morphology.dilation(wire_mask, footprint=morphology.disk(line_thickness))
 
     component_mask = binary & ~wire_mask
-    component_mask = morphology.remove_small_objects(component_mask, min_size=min_area)
     labeled = measure.label(component_mask)
+    filtered = np.zeros_like(labeled, dtype=np.int32)
+    next_label = 1
+    for region in measure.regionprops(labeled):
+        if region.area < min_area:
+            continue
+        coords = region.coords
+        filtered[coords[:, 0], coords[:, 1]] = next_label
+        next_label += 1
+    labeled = filtered
     regions = measure.regionprops(labeled)
     detections: list[ComponentRegion] = []
 
