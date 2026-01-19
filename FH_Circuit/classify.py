@@ -10,7 +10,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 from sklearn.decomposition import PCA
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
 from FH_Circuit.data import AMBIGUOUS_COARSE_GROUPS, labels_for_coarse_group
@@ -22,10 +23,11 @@ from FH_Circuit.preprocess import extract_graph_features_from_binary, preprocess
 class StageArtifacts:
     model: ConvAutoencoder
     pca: PCA
-    classifier: KNeighborsClassifier
+    classifier: SVC
     labels: List[str]
     feature_mean: np.ndarray
     feature_std: np.ndarray
+    latent_scaler: StandardScaler
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,6 +54,17 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         pca = pickle.load(file)
     with (model_dir / "classifier.pkl").open("rb") as file:
         classifier = pickle.load(file)
+    latent_scaler_path = model_dir / "latent_scaler.pkl"
+    if latent_scaler_path.exists():
+        with latent_scaler_path.open("rb") as file:
+            latent_scaler = pickle.load(file)
+    else:
+        latent_scaler = StandardScaler()
+        latent_scaler.mean_ = np.zeros(checkpoint["latent_dim"], dtype=np.float64)
+        latent_scaler.scale_ = np.ones(checkpoint["latent_dim"], dtype=np.float64)
+        latent_scaler.var_ = np.ones(checkpoint["latent_dim"], dtype=np.float64)
+        latent_scaler.n_features_in_ = checkpoint["latent_dim"]
+        latent_scaler.n_samples_seen_ = 1
     return StageArtifacts(
         model=model,
         pca=pca,
@@ -59,6 +72,7 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         labels=labels,
         feature_mean=np.array(feature_mean, dtype=np.float32),
         feature_std=np.array(feature_std, dtype=np.float32),
+        latent_scaler=latent_scaler,
     )
 
 
@@ -81,11 +95,14 @@ def _predict_label(
     reduced: np.ndarray,
     ambiguity_threshold: float,
 ) -> Tuple[str, bool]:
-    distances, _ = stage.classifier.kneighbors(reduced, n_neighbors=min(3, len(stage.labels)))
-    predicted_index = int(stage.classifier.predict(reduced)[0])
+    probabilities = stage.classifier.predict_proba(reduced)[0]
+    top_indices = np.argsort(probabilities)[-2:]
+    predicted_index = int(top_indices[-1])
     if predicted_index < 0 or predicted_index >= len(stage.labels):
         raise ValueError("Model output out of range. Check training labels.")
-    if distances.shape[1] > 1 and (distances[0, 1] - distances[0, 0]) < ambiguity_threshold:
+    top_score = probabilities[predicted_index]
+    second_score = probabilities[top_indices[-2]] if len(top_indices) > 1 else 0.0
+    if (top_score - second_score) < ambiguity_threshold:
         return "", True
     return stage.labels[predicted_index], False
 
@@ -105,8 +122,9 @@ def classify_sketch(
     recon_error = torch.mean((recon - tensor) ** 2).item()
     if recon_error > error_threshold:
         return "Novelty detected: unknown component."
+    normalized_latent = artifacts.coarse.latent_scaler.transform(latent.cpu().numpy())
     normalized_features = (graph_features - artifacts.coarse.feature_mean) / artifacts.coarse.feature_std
-    combined = np.concatenate([latent.cpu().numpy(), normalized_features[None, :]], axis=1)
+    combined = np.concatenate([normalized_latent, normalized_features[None, :]], axis=1)
     reduced = artifacts.coarse.pca.transform(combined)
     coarse_label, coarse_ambiguous = _predict_label(artifacts.coarse, reduced, ambiguity_threshold)
     if coarse_ambiguous or not coarse_label:
@@ -116,8 +134,9 @@ def classify_sketch(
         fine_stage.model.eval()
         with torch.no_grad():
             _, fine_latent = fine_stage.model(tensor)
+        normalized_fine_latent = fine_stage.latent_scaler.transform(fine_latent.cpu().numpy())
         fine_features = (graph_features - fine_stage.feature_mean) / fine_stage.feature_std
-        fine_combined = np.concatenate([fine_latent.cpu().numpy(), fine_features[None, :]], axis=1)
+        fine_combined = np.concatenate([normalized_fine_latent, fine_features[None, :]], axis=1)
         fine_reduced = fine_stage.pca.transform(fine_combined)
         fine_label, fine_ambiguous = _predict_label(fine_stage, fine_reduced, ambiguity_threshold)
         if fine_ambiguous or not fine_label:

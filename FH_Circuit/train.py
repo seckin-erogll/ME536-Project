@@ -12,7 +12,8 @@ import numpy as np
 import torch
 from PIL import Image
 from sklearn.decomposition import PCA
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -92,11 +93,10 @@ def fit_pca_classifier(
     latents: np.ndarray,
     sample_labels: List[int],
     components: int,
-) -> Tuple[PCA, KNeighborsClassifier]:
+) -> Tuple[PCA, SVC]:
     pca = PCA(n_components=components)
     reduced = pca.fit_transform(latents)
-    unique_labels = sorted(set(sample_labels))
-    classifier = KNeighborsClassifier(n_neighbors=min(3, len(unique_labels)))
+    classifier = SVC(kernel="rbf", probability=True, C=1.0)
     classifier.fit(reduced, sample_labels)
     return pca, classifier
 
@@ -148,11 +148,12 @@ def save_artifacts(
     output_dir: Path,
     model: ConvAutoencoder,
     pca: PCA,
-    classifier: KNeighborsClassifier,
+    classifier: SVC,
     latent_dim: int,
     labels: List[str],
     feature_mean: np.ndarray,
     feature_std: np.ndarray,
+    latent_scaler: StandardScaler,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -169,6 +170,8 @@ def save_artifacts(
         pickle.dump(pca, file)
     with (output_dir / "classifier.pkl").open("wb") as file:
         pickle.dump(classifier, file)
+    with (output_dir / "latent_scaler.pkl").open("wb") as file:
+        pickle.dump(latent_scaler, file)
 
 
 def train_stage(
@@ -182,15 +185,27 @@ def train_stage(
     dataset = SymbolDataset(samples, labels)
     model = train_autoencoder(dataset, epochs=epochs, batch_size=batch_size, latent_dim=latent_dim)
     latents, sample_labels = extract_latents(model, dataset)
+    latent_scaler = StandardScaler()
+    latents_norm = latent_scaler.fit_transform(latents)
     graph_features = np.stack([extract_graph_features(sample.image) for sample in samples])
     feature_mean = graph_features.mean(axis=0)
     feature_std = graph_features.std(axis=0)
     feature_std[feature_std == 0] = 1.0
     normalized_features = (graph_features - feature_mean) / feature_std
-    combined = np.concatenate([latents, normalized_features], axis=1)
+    combined = np.concatenate([latents_norm, normalized_features], axis=1)
     components = min(latent_dim, 16)
     pca, classifier = fit_pca_classifier(combined, sample_labels, components)
-    save_artifacts(output_dir, model, pca, classifier, latent_dim, labels, feature_mean, feature_std)
+    save_artifacts(
+        output_dir,
+        model,
+        pca,
+        classifier,
+        latent_dim,
+        labels,
+        feature_mean,
+        feature_std,
+        latent_scaler,
+    )
     print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
     save_reconstructions(model, samples, output_dir)
 

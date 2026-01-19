@@ -12,7 +12,7 @@ Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component c
 - `FH_Circuit/data.py`: training data loader (reads labels from folder names).
 - `FH_Circuit/preprocess.py`: thresholding, skeletonization, dilation.
 - `FH_Circuit/model.py`: convolutional autoencoder.
-- `FH_Circuit/train.py`: training loop + PCA/k-means artifacts.
+- `FH_Circuit/train.py`: training loop + PCA/SVM artifacts.
 - `FH_Circuit/dataset.py`: PyTorch dataset wrapper used by training.
 
 **Inference/GUI files**
