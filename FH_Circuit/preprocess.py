@@ -119,7 +119,7 @@ def _morphology_cleanup(binary: np.ndarray) -> np.ndarray:
         selem = morphology.footprint_rectangle((3, 3))
         opened = morphology.opening(binary.astype(bool), selem)
         closed = morphology.closing(opened, selem)
-        cleaned = morphology.remove_small_objects(closed, min_size=5)
+        cleaned = morphology.remove_small_objects(closed.astype(bool), min_size=5)
         return cleaned.astype(np.uint8)
     # Safe fallback: avoid aggressive erosion that would destroy thin strokes.
     cleaned = _remove_tiny_components(binary, min_size=5)
