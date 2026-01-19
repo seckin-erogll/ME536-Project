@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import numpy as np
 from PIL import Image
-from skimage import filters, morphology
 
 from FH_Circuit.config import IMAGE_SIZE, MIN_AREA
 
+_SKIMAGE_AVAILABLE = importlib.util.find_spec("skimage") is not None
+if _SKIMAGE_AVAILABLE:
+    from skimage import filters, morphology
+
 
 def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
-    thresh = filters.threshold_otsu(image)
-    binary = (image > thresh).astype(np.uint8)
+    binary = binarize_image(image)
     if binary.sum() < min_area:
         raise ValueError("Noise detected: sketch too small.")
     binary = _normalize_to_canvas(binary)
-    footprint = morphology.footprint_rectangle((1, 1))
-    dilated = morphology.dilation(binary, footprint=footprint)
-    return dilated.astype(np.float32)
+    if _SKIMAGE_AVAILABLE:
+        footprint = morphology.footprint_rectangle((1, 1))
+        dilated = morphology.dilation(binary, footprint=footprint)
+        return dilated.astype(np.float32)
+    return binary.astype(np.float32)
 
 
 def extract_graph_features(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
@@ -26,7 +32,10 @@ def extract_graph_features(image: np.ndarray, min_area: int = MIN_AREA) -> np.nd
 
 
 def extract_graph_features_from_binary(binary: np.ndarray) -> np.ndarray:
-    skeleton = morphology.skeletonize(binary > 0)
+    if _SKIMAGE_AVAILABLE:
+        skeleton = morphology.skeletonize(binary > 0)
+    else:
+        skeleton = binary > 0
     coords = np.column_stack(np.where(skeleton))
     if coords.size == 0:
         return np.zeros(6, dtype=np.float32)
@@ -99,3 +108,39 @@ def _normalize_to_canvas(binary: np.ndarray) -> np.ndarray:
         np.array(resized) > 0
     ).astype(np.uint8)
     return canvas
+
+
+def binarize_image(image: np.ndarray) -> np.ndarray:
+    """Binarize grayscale input with a best-effort Otsu fallback."""
+    threshold = _threshold_otsu(image)
+    binary = (image > threshold).astype(np.uint8)
+    if binary.mean() > 0.5:
+        binary = 1 - binary
+    return binary
+
+
+def _threshold_otsu(image: np.ndarray) -> float:
+    if _SKIMAGE_AVAILABLE:
+        return float(filters.threshold_otsu(image))
+    hist, bin_edges = np.histogram(image.ravel(), bins=256)
+    total = image.size
+    sum_total = np.dot(hist, np.arange(256))
+    sum_b = 0.0
+    weight_b = 0.0
+    max_between = 0.0
+    threshold = 0
+    for i in range(256):
+        weight_b += hist[i]
+        if weight_b == 0:
+            continue
+        weight_f = total - weight_b
+        if weight_f == 0:
+            break
+        sum_b += i * hist[i]
+        mean_b = sum_b / weight_b
+        mean_f = (sum_total - sum_b) / weight_f
+        between = weight_b * weight_f * (mean_b - mean_f) ** 2
+        if between > max_between:
+            max_between = between
+            threshold = i
+    return float(threshold)

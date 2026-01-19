@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.circuit_analyze import analyze_circuit, serialize_analysis
+from FH_Circuit.circuit_gui import launch_circuit_gui
 from FH_Circuit.data import load_training_dataset
 from FH_Circuit.gui import launch_gui
 from FH_Circuit.train import train_pipeline
@@ -88,6 +91,10 @@ def run_gui(args: argparse.Namespace) -> None:
     launch_gui(args.model_dir, args.dataset_dir)
 
 
+def run_circuit_gui(_args: argparse.Namespace) -> None:
+    launch_circuit_gui()
+
+
 def run_classify(args: argparse.Namespace) -> None:
     if args.prompt and args.image is None:
         args.image = _prompt_file_path("Image path")
@@ -101,6 +108,18 @@ def run_classify(args: argparse.Namespace) -> None:
     sketch = np.array(image)
     result = classify_sketch(artifacts, sketch)
     print(result)
+
+
+def run_analyze_circuit(args: argparse.Namespace) -> None:
+    if args.prompt and args.image is None:
+        args.image = _prompt_file_path("Image path")
+    if args.image is None:
+        raise ValueError("Image path is required for circuit analysis.")
+    image = Image.open(args.image).convert("L")
+    result = analyze_circuit(image, debug_dir=args.output)
+    output = serialize_analysis(result, include_crops=False)
+    print(json.dumps(output, indent=2))
+    print(f"Debug artifacts saved to {args.output}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,11 +151,25 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     gui.set_defaults(func=run_gui, prompt=True)
 
+    circuit_gui = subparsers.add_parser("circuit_gui", help="Launch the circuit drawing GUI.")
+    circuit_gui.set_defaults(func=run_circuit_gui)
+
     classify = subparsers.add_parser("classify", help="Classify a sketch image.")
     classify.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
     classify.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
     classify.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     classify.set_defaults(func=run_classify, prompt=True)
+
+    analyze = subparsers.add_parser("analyze_circuit", help="Analyze a full circuit sketch.")
+    analyze.add_argument("--image", type=Path, help="Path to the circuit sketch image.")
+    analyze.add_argument(
+        "--output",
+        type=Path,
+        default=Path("./artifacts/debug_circuit"),
+        help="Output folder for debug images and JSON.",
+    )
+    analyze.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
+    analyze.set_defaults(func=run_analyze_circuit, prompt=True)
 
     return parser
 
@@ -145,7 +178,16 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.command is None:
-        choice = _prompt_choice("Select mode", {"train": "Train", "gui": "GUI", "classify": "Classify"})
+        choice = _prompt_choice(
+            "Select mode",
+            {
+                "train": "Train",
+                "gui": "GUI",
+                "circuit_gui": "Circuit GUI",
+                "classify": "Classify",
+                "analyze_circuit": "Analyze Circuit",
+            },
+        )
         args = parser.parse_args([choice])
     args.func(args)
 

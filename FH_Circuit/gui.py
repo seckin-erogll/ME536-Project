@@ -11,6 +11,9 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.preprocess import binarize_image
+
+ROTATED_THRESHOLD_DEG = 10.0
 
 
 class SketchGUI:
@@ -33,6 +36,11 @@ class SketchGUI:
         self.status = tk.StringVar(value="Draw a circuit symbol.")
         self.status_label = ttk.Label(self.root, textvariable=self.status)
         self.status_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
+
+        self.details_label = ttk.Label(self.root, text="Details")
+        self.details_label.grid(row=3, column=0, columnspan=3)
+        self.details_text = tk.Text(self.root, width=40, height=6, state="disabled")
+        self.details_text.grid(row=4, column=0, columnspan=3, padx=10, pady=(0, 10))
 
         ttk.Button(self.root, text="Classify", command=self.on_classify).grid(row=2, column=0, padx=5, pady=5)
         ttk.Button(self.root, text="Clear", command=self.on_clear).grid(row=2, column=1, padx=5, pady=5)
@@ -71,6 +79,7 @@ class SketchGUI:
         self.image = Image.new("L", (self.canvas_size, self.canvas_size), color=0)
         self.draw = ImageDraw.Draw(self.image)
         self.status.set("Canvas cleared.")
+        self._update_details("")
 
     def on_classify(self) -> None:
         resized = self.image.resize((64, 64), resample=Image.BILINEAR)
@@ -81,6 +90,7 @@ class SketchGUI:
             result = str(exc)
         self.status.set(result)
         self._update_example_from_result(result)
+        self._update_overlays()
 
     def run(self) -> None:
         self.root.mainloop()
@@ -127,6 +137,78 @@ class SketchGUI:
         self.example_photo = ImageTk.PhotoImage(image)
         self.example_image_label.configure(image=self.example_photo)
         self.example_caption.config(text=f"Label: {label}")
+
+    def _update_overlays(self) -> None:
+        self.canvas.delete("overlay")
+        image_array = np.array(self.image)
+        binary = binarize_image(image_array)
+        coords = np.column_stack(np.where(binary > 0))
+        if coords.size == 0:
+            self._update_details("No foreground detected.")
+            return
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+        angle, direction = _compute_pca_angle(coords)
+        deviation = min(abs(angle), abs(abs(angle) - 90.0))
+        rotated = deviation > ROTATED_THRESHOLD_DEG
+
+        self.canvas.create_rectangle(
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+            outline="yellow",
+            width=2,
+            tags="overlay",
+        )
+        cx = (x_min + x_max) / 2.0
+        cy = (y_min + y_max) / 2.0
+        length = max(x_max - x_min, y_max - y_min) * 0.4
+        dx, dy = direction
+        x_end = cx + dx * length
+        y_end = cy + dy * length
+        self.canvas.create_line(
+            cx,
+            cy,
+            x_end,
+            y_end,
+            fill="cyan",
+            width=2,
+            arrow=tk.LAST,
+            tags="overlay",
+        )
+
+        details = (
+            f"bbox: ({x_min}, {y_min}) -> ({x_max}, {y_max})\n"
+            f"angle: {angle:.1f} deg\n"
+            f"rotated: {rotated}"
+        )
+        self._update_details(details)
+
+    def _update_details(self, text: str) -> None:
+        self.details_text.configure(state="normal")
+        self.details_text.delete("1.0", tk.END)
+        self.details_text.insert(tk.END, text)
+        self.details_text.configure(state="disabled")
+
+
+def _compute_pca_angle(coords: np.ndarray) -> tuple[float, tuple[float, float]]:
+    points = coords[:, ::-1].astype(np.float32)
+    mean = points.mean(axis=0)
+    centered = points - mean
+    cov = np.cov(centered, rowvar=False)
+    if cov.shape == ():
+        return 0.0, (1.0, 0.0)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    principal = eigvecs[:, np.argmax(eigvals)]
+    angle = float(np.degrees(np.arctan2(principal[1], principal[0])))
+    if angle > 90:
+        angle -= 180
+    if angle < -90:
+        angle += 180
+    norm = np.hypot(principal[0], principal[1])
+    direction = (float(principal[0] / norm), float(principal[1] / norm))
+    return angle, direction
 
 
 def launch_gui(model_dir: Path, dataset_dir: Path) -> None:
