@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import pickle
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -12,6 +13,9 @@ import torch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+
+if __package__ is None:
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
 from FH_Circuit.data import AMBIGUOUS_COARSE_GROUPS, labels_for_coarse_group
