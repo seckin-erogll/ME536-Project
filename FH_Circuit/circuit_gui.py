@@ -135,16 +135,17 @@ class CircuitDrawGUI:
             for candidate in self.analysis_result.get("symbol_candidates", []):
                 x0, y0, x1, y1 = candidate["bbox"]
                 self.canvas.create_rectangle(
-                    x0, y0, x1, y1, outline="yellow", width=2, tags="overlay"
+                    x0, y0, x1, y1, outline="lime", width=2, tags="overlay"
                 )
                 label = candidate.get("label")
                 if label:
                     self.canvas.create_text(
-                        x0 + 4,
-                        y0 - 8,
+                        x0 + 6,
+                        max(0, y0 - 14),
                         text=label,
-                        fill="white",
+                        fill="lime",
                         anchor="nw",
+                        font=("Helvetica", 10, "bold"),
                         tags="overlay",
                     )
         if self.show_terminals.get():

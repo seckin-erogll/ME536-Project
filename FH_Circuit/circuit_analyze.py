@@ -196,7 +196,7 @@ def _binary_close(binary: np.ndarray, radius: int) -> np.ndarray:
     if radius <= 0:
         return binary
     if _SKIMAGE_AVAILABLE:
-        return morphology.binary_closing(binary > 0, morphology.disk(radius))
+        return morphology.closing(binary > 0, morphology.disk(radius))
     dilated = _binary_dilation(binary > 0, radius)
     return _binary_erosion(dilated, radius)
 
