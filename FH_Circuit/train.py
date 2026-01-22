@@ -60,7 +60,7 @@ def build_training_transforms() -> T.Compose:
     )
 
 
-def plot_loss_curves(history: Dict[str, List[float]], output_dir: Path) -> None:
+def plot_loss_curves(history: Dict[str, List[float]], output_dir: Path) -> Path:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -70,14 +70,18 @@ def plot_loss_curves(history: Dict[str, List[float]], output_dir: Path) -> None:
     plt.plot(epochs, history["train_recon"], label="Reconstruction loss (train)")
     if history["val_total"]:
         plt.plot(epochs, history["val_total"], label="Validation loss")
+    if history["val_recon"]:
+        plt.plot(epochs, history["val_recon"], label="Reconstruction loss (val)")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Training/Validation Loss")
+    plt.title("Training/Validation Loss Curves")
     plt.legend()
     plt.tight_layout()
     output_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_dir / "loss_curves.png")
+    output_path = output_dir / "loss_curves.png"
+    plt.savefig(output_path)
     plt.close()
+    return output_path
 
 
 def train_autoencoder(
@@ -283,7 +287,8 @@ def train_stage(
         num_classes=len(labels),
         class_loss_weight=class_loss_weight,
     )
-    plot_loss_curves(history, output_dir)
+    loss_curve_path = plot_loss_curves(history, output_dir)
+    print(f"Saved loss curves to: {loss_curve_path}")
     eval_dataset = SymbolDataset(train_samples, labels)
     latents, sample_labels = extract_latents(model, eval_dataset)
     latent_scaler = StandardScaler()
