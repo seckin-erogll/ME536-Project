@@ -33,13 +33,21 @@ pip install numpy Pillow scikit-learn torch
 
 ### 2) Verify training data layout
 
-Your dataset should live in `FH_Circuit/Training_Data` with one folder per class label:
+Your dataset should live in `FH_Circuit/Training_Data` with one folder per class label. Training will
+create `train/` and `validation/` subfolders inside each class folder (80/20 split) if they do not
+already exist:
 
 ```
 FH_Circuit/Training_Data/
   resistor/
+    train/
+    validation/
   cap/
+    train/
+    validation/
   inductor/
+    train/
+    validation/
   ...
 ```
 
@@ -65,5 +73,5 @@ python main.py classify path/to/sketch.png --model-dir ./artifacts
 
 ## Dependencies
 
-- Training: `numpy`, `Pillow`, `scikit-learn`, `torch`
+- Training: `numpy`, `Pillow`, `scikit-learn`, `torch`, `torchvision`, `matplotlib`
 - GUI: `tkinter` (bundled with most Python distributions)
