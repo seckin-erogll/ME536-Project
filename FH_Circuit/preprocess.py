@@ -4,81 +4,22 @@ from __future__ import annotations
 
 import numpy as np
 from PIL import Image
-from skimage import filters, morphology
+from numpy.lib.stride_tricks import sliding_window_view
 
 from FH_Circuit.config import IMAGE_SIZE, MIN_AREA
 
 
 def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
-    thresh = filters.threshold_otsu(image)
+    thresh = _otsu_threshold(image)
     binary = (image > thresh).astype(np.uint8)
     if binary.sum() < min_area:
         raise ValueError("Noise detected: sketch too small.")
     binary = _normalize_to_canvas(binary)
     binary = _center_of_mass_align(binary)
-    footprint = morphology.disk(2)
-    dilated = morphology.dilation(binary, footprint=footprint)
-    closed = morphology.closing(dilated, footprint=footprint)
+    footprint = _disk_footprint(2)
+    dilated = _binary_dilation(binary, footprint)
+    closed = _binary_closing(dilated, footprint)
     return closed.astype(np.float32)
-
-
-def extract_graph_features(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
-    processed = preprocess(image, min_area=min_area)
-    return extract_graph_features_from_binary(processed)
-
-
-def extract_graph_features_from_binary(binary: np.ndarray) -> np.ndarray:
-    skeleton = morphology.skeletonize(binary > 0)
-    coords = np.column_stack(np.where(skeleton))
-    if coords.size == 0:
-        return np.zeros(6, dtype=np.float32)
-    skeleton_set = {tuple(coord) for coord in coords}
-    neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-
-    def neighbor_coords(point: tuple[int, int]) -> list[tuple[int, int]]:
-        row, col = point
-        return [
-            (row + dr, col + dc)
-            for dr, dc in neighbors
-            if (row + dr, col + dc) in skeleton_set
-        ]
-
-    degrees = {point: len(neighbor_coords(point)) for point in skeleton_set}
-    endpoints = [point for point, degree in degrees.items() if degree == 1]
-    junctions = [point for point, degree in degrees.items() if degree >= 3]
-    nodes = set(endpoints + junctions)
-    edge_lengths: list[int] = []
-    visited_steps: set[tuple[tuple[int, int], tuple[int, int]]] = set()
-
-    for node in nodes:
-        for neighbor in neighbor_coords(node):
-            step = (node, neighbor)
-            if step in visited_steps:
-                continue
-            length = 1
-            prev = node
-            current = neighbor
-            visited_steps.add(step)
-            while current not in nodes:
-                next_candidates = [cand for cand in neighbor_coords(current) if cand != prev]
-                if not next_candidates:
-                    break
-                next_point = next_candidates[0]
-                visited_steps.add((current, next_point))
-                prev, current = current, next_point
-                length += 1
-            edge_lengths.append(length)
-
-    total_pixels = len(skeleton_set)
-    num_endpoints = len(endpoints)
-    num_junctions = len(junctions)
-    avg_edge_length = float(np.mean(edge_lengths)) if edge_lengths else 0.0
-    max_edge_length = float(np.max(edge_lengths)) if edge_lengths else 0.0
-    mean_degree = float(np.mean(list(degrees.values()))) if degrees else 0.0
-    return np.array(
-        [total_pixels, num_endpoints, num_junctions, avg_edge_length, max_edge_length, mean_degree],
-        dtype=np.float32,
-    )
 
 
 def _normalize_to_canvas(binary: np.ndarray) -> np.ndarray:
@@ -120,3 +61,58 @@ def _center_of_mass_align(binary: np.ndarray) -> np.ndarray:
     elif shift[1] < 0:
         shifted[:, shift[1] :] = 0
     return shifted
+
+
+def _otsu_threshold(image: np.ndarray) -> float:
+    flat = image.astype(np.float32).ravel()
+    if flat.size == 0:
+        return 0.0
+    min_val = float(flat.min())
+    max_val = float(flat.max())
+    if min_val == max_val:
+        return min_val
+    hist, bin_edges = np.histogram(flat, bins=256, range=(min_val, max_val))
+    hist = hist.astype(np.float64)
+    prob = hist / hist.sum()
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    weight1 = np.cumsum(prob)
+    mean1 = np.cumsum(prob * bin_centers)
+    mean_total = mean1[-1]
+    weight2 = 1.0 - weight1
+    numerator = (mean_total * weight1 - mean1) ** 2
+    denominator = weight1 * weight2
+    with np.errstate(divide="ignore", invalid="ignore"):
+        variance = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator > 0)
+    best_index = int(np.argmax(variance[:-1]))
+    return float(bin_centers[best_index])
+
+
+def _disk_footprint(radius: int) -> np.ndarray:
+    side = radius * 2 + 1
+    y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
+    mask = (x * x + y * y) <= radius * radius
+    return mask.astype(np.uint8)
+
+
+def _binary_dilation(binary: np.ndarray, footprint: np.ndarray) -> np.ndarray:
+    pad_y = footprint.shape[0] // 2
+    pad_x = footprint.shape[1] // 2
+    padded = np.pad(binary, ((pad_y, pad_y), (pad_x, pad_x)), mode="constant")
+    windows = sliding_window_view(padded, footprint.shape)
+    mask = footprint.astype(bool)
+    dilated = windows[..., mask].max(axis=-1)
+    return dilated.astype(np.uint8)
+
+
+def _binary_erosion(binary: np.ndarray, footprint: np.ndarray) -> np.ndarray:
+    pad_y = footprint.shape[0] // 2
+    pad_x = footprint.shape[1] // 2
+    padded = np.pad(binary, ((pad_y, pad_y), (pad_x, pad_x)), mode="constant", constant_values=1)
+    windows = sliding_window_view(padded, footprint.shape)
+    mask = footprint.astype(bool)
+    eroded = windows[..., mask].min(axis=-1)
+    return eroded.astype(np.uint8)
+
+
+def _binary_closing(binary: np.ndarray, footprint: np.ndarray) -> np.ndarray:
+    return _binary_erosion(_binary_dilation(binary, footprint), footprint)

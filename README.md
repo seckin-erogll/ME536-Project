@@ -10,7 +10,7 @@ Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component c
 
 **Training pipeline files**
 - `FH_Circuit/data.py`: training data loader (reads labels from folder names).
-- `FH_Circuit/preprocess.py`: thresholding, skeletonization, dilation.
+- `FH_Circuit/preprocess.py`: thresholding and morphological cleanup.
 - `FH_Circuit/model.py`: convolutional autoencoder.
 - `FH_Circuit/train.py`: training loop + PCA/SVM artifacts.
 - `FH_Circuit/dataset.py`: PyTorch dataset wrapper used by training.
@@ -28,7 +28,7 @@ Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component c
 ### 1) Install dependencies
 
 ```bash
-pip install numpy Pillow scikit-image scikit-learn torch
+pip install numpy Pillow scikit-learn torch
 ```
 
 ### 2) Verify training data layout
@@ -65,5 +65,5 @@ python main.py classify path/to/sketch.png --model-dir ./artifacts
 
 ## Dependencies
 
-- Training: `numpy`, `Pillow`, `scikit-image`, `scikit-learn`, `torch`
+- Training: `numpy`, `Pillow`, `scikit-learn`, `torch`
 - GUI: `tkinter` (bundled with most Python distributions)
