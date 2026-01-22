@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from FH_Circuit.config import IMAGE_SIZE
+from FH_Circuit.preprocess import preprocess
 
 
 COARSE_GROUPS: dict[str, list[str]] = {
@@ -216,6 +217,7 @@ def _load_samples_from_root(dataset_dir: Path, size: int) -> Tuple[List[Sample],
     samples: List[Sample] = []
     labels: List[str] = []
     image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    skipped = 0
     for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
         if not class_dir.is_dir():
             continue
@@ -228,10 +230,18 @@ def _load_samples_from_root(dataset_dir: Path, size: int) -> Tuple[List[Sample],
                 continue
             image = Image.open(image_path).convert("L")
             image = image.resize((size, size), resample=Image.BILINEAR)
-            samples.append(Sample(image=np.array(image), label=label))
+            image_array = np.array(image)
+            try:
+                preprocess(image_array)
+            except ValueError:
+                skipped += 1
+                continue
+            samples.append(Sample(image=image_array, label=label))
     if not samples:
         raise ValueError("No samples found. Check dataset directory structure and labels.")
     random.shuffle(samples)
+    if skipped:
+        print(f"Skipped {skipped} unusable samples in {dataset_dir}.")
     return samples, labels
 
 
