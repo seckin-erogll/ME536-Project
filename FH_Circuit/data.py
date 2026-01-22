@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import random
+import shutil
 from pathlib import Path
 from typing import List, Tuple
 
@@ -12,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from FH_Circuit.config import IMAGE_SIZE
+from FH_Circuit.preprocess import preprocess
 
 
 COARSE_GROUPS: dict[str, list[str]] = {
@@ -144,14 +146,78 @@ def synthesize_sample(symbol: str, size: int = IMAGE_SIZE) -> np.ndarray:
     return arr
 
 
-def load_training_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> Tuple[List[Sample], List[str]]:
+def load_training_dataset(
+    dataset_dir: Path, size: int = IMAGE_SIZE
+) -> Tuple[List[Sample], List[Sample], List[str]]:
     if not dataset_dir.exists():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
 
+    train_dir = dataset_dir / "train"
+    validation_dir = dataset_dir / "validation"
+    val_dir = dataset_dir / "val"
+    if not validation_dir.exists() and val_dir.exists():
+        validation_dir = val_dir
+
+    if train_dir.exists() and validation_dir.exists():
+        train_samples, labels = _load_samples_from_root(train_dir, size=size)
+        validation_samples, _ = _load_samples_from_root(validation_dir, size=size)
+        return train_samples, validation_samples, labels
+
+    samples: dict[str, List[Path]] = {}
+    image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+    for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
+        if not class_dir.is_dir() or class_dir.name in {"train", "validation", "val"}:
+            continue
+        label = class_dir.name.strip()
+        if not label:
+            continue
+        for image_path in class_dir.iterdir():
+            if image_path.suffix.lower() not in image_extensions:
+                continue
+            samples.setdefault(label, []).append(image_path)
+
+    if not samples:
+        raise ValueError("No samples found. Check dataset directory structure and labels.")
+    _split_dataset_on_disk(dataset_dir, samples, image_extensions)
+    train_samples, labels = _load_samples_from_root(train_dir, size=size)
+    validation_samples, _ = _load_samples_from_root(validation_dir, size=size)
+    return train_samples, validation_samples, labels
+
+
+def _split_dataset_on_disk(
+    dataset_dir: Path,
+    samples: dict[str, List[Path]],
+    image_extensions: set[str],
+    train_ratio: float = 0.8,
+) -> None:
+    train_dir = dataset_dir / "train"
+    validation_dir = dataset_dir / "validation"
+    train_dir.mkdir(parents=True, exist_ok=True)
+    validation_dir.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(42)
+    for label, image_paths in samples.items():
+        rng.shuffle(image_paths)
+        total = len(image_paths)
+        val_count = 0 if total < 2 else max(1, int(round(total * (1 - train_ratio))))
+        train_paths = image_paths[: total - val_count]
+        val_paths = image_paths[total - val_count :]
+        for split_dir, split_paths in ((train_dir, train_paths), (validation_dir, val_paths)):
+            class_dir = split_dir / label
+            class_dir.mkdir(parents=True, exist_ok=True)
+            for image_path in split_paths:
+                if image_path.suffix.lower() not in image_extensions:
+                    continue
+                dest_path = class_dir / image_path.name
+                if not dest_path.exists():
+                    shutil.copy2(image_path, dest_path)
+
+
+def _load_samples_from_root(dataset_dir: Path, size: int) -> Tuple[List[Sample], List[str]]:
     samples: List[Sample] = []
     labels: List[str] = []
     image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-
+    skipped = 0
     for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
         if not class_dir.is_dir():
             continue
@@ -164,11 +230,18 @@ def load_training_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> Tuple[Li
                 continue
             image = Image.open(image_path).convert("L")
             image = image.resize((size, size), resample=Image.BILINEAR)
-            samples.append(Sample(image=np.array(image), label=label))
-
+            image_array = np.array(image)
+            try:
+                preprocess(image_array)
+            except ValueError:
+                skipped += 1
+                continue
+            samples.append(Sample(image=image_array, label=label))
     if not samples:
         raise ValueError("No samples found. Check dataset directory structure and labels.")
     random.shuffle(samples)
+    if skipped:
+        print(f"Skipped {skipped} unusable samples in {dataset_dir}.")
     return samples, labels
 
 

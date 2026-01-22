@@ -10,26 +10,23 @@ from typing import List, Tuple
 
 import numpy as np
 import torch
+from matplotlib import pyplot as plt
 from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from torch import nn
 from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from FH_Circuit.data import (
-    AMBIGUOUS_COARSE_GROUPS,
-    Sample,
-    labels_for_coarse_group,
-    list_coarse_labels,
-    resolve_coarse_label,
-)
+from FH_Circuit.data import Sample
 from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
-from FH_Circuit.preprocess import extract_graph_features, preprocess
+from FH_Circuit.preprocess import preprocess
 
 
 def resolve_device() -> torch.device:
@@ -47,25 +44,33 @@ def describe_device(device: torch.device) -> str:
 
 
 def train_autoencoder(
-    dataset: SymbolDataset,
+    train_dataset: SymbolDataset,
+    validation_dataset: SymbolDataset | None,
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
     log_interval: int = 0,
     num_classes: int = 1,
     class_loss_weight: float = 0.3,
-) -> SupervisedAutoencoder:
+) -> tuple[SupervisedAutoencoder, dict[str, list[float]]]:
     device = resolve_device()
     print(f"Training on device: {describe_device(device)}")
-    print(f"Dataset size: {len(dataset)} | Batch size: {batch_size} | Latent dim: {latent_dim}")
+    print(f"Dataset size: {len(train_dataset)} | Batch size: {batch_size} | Latent dim: {latent_dim}")
     model = SupervisedAutoencoder(latent_dim=latent_dim, num_classes=num_classes).to(device)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    validation_loader = (
+        DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
+        if validation_dataset is not None
+        else None
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     recon_criterion = nn.MSELoss()
     class_criterion = nn.CrossEntropyLoss()
+    history = {"train_loss": [], "train_recon_loss": [], "val_loss": []}
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
+        running_recon_loss = 0.0
         start = time.perf_counter()
         for step, (inputs, labels) in enumerate(loader, start=1):
             inputs = inputs.to(device)
@@ -78,6 +83,7 @@ def train_autoencoder(
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
+            running_recon_loss += recon_loss.item()
             if epoch == 1 and step == 1:
                 print(
                     "Debug first batch:",
@@ -90,9 +96,33 @@ def train_autoencoder(
                 avg_loss = running_loss / step
                 print(f"Epoch {epoch}/{epochs} | Step {step}/{len(loader)} | Loss {avg_loss:.6f}")
         avg_epoch_loss = running_loss / max(1, len(loader))
+        avg_epoch_recon = running_recon_loss / max(1, len(loader))
+        history["train_loss"].append(avg_epoch_loss)
+        history["train_recon_loss"].append(avg_epoch_recon)
+        val_loss = float("nan")
+        if validation_loader is not None:
+            model.eval()
+            val_running = 0.0
+            with torch.no_grad():
+                for inputs, labels in validation_loader:
+                    inputs = inputs.to(device)
+                    labels = labels.to(device)
+                    recon, _, logits = model(inputs)
+                    recon_loss = recon_criterion(recon, inputs)
+                    class_loss = class_criterion(logits, labels)
+                    loss = recon_loss + class_loss_weight * class_loss
+                    val_running += loss.item()
+            val_loss = val_running / max(1, len(validation_loader))
+        history["val_loss"].append(val_loss)
         duration = time.perf_counter() - start
-        print(f"Epoch {epoch}/{epochs} complete | Avg Loss {avg_epoch_loss:.6f} | {duration:.1f}s")
-    return model
+        print(
+            f"Epoch {epoch}/{epochs} complete | "
+            f"Train Loss {avg_epoch_loss:.6f} | "
+            f"Recon Loss {avg_epoch_recon:.6f} | "
+            f"Val Loss {val_loss:.6f} | "
+            f"{duration:.1f}s"
+        )
+    return model, history
 
 
 def fit_pca_classifier(
@@ -107,7 +137,7 @@ def fit_pca_classifier(
     return pca, classifier
 
 
-def extract_latents(model, dataset) -> np.ndarray:
+def extract_latents(model, dataset) -> tuple[np.ndarray, list[int]]:
     model.eval()
     latents = []
     sample_labels = []
@@ -165,8 +195,6 @@ def save_artifacts(
     classifier: SVC,
     latent_dim: int,
     labels: List[str],
-    feature_mean: np.ndarray,
-    feature_std: np.ndarray,
     latent_scaler: StandardScaler,
     model_type: str,
 ) -> None:
@@ -176,8 +204,6 @@ def save_artifacts(
             "state_dict": model.state_dict(),
             "latent_dim": latent_dim,
             "labels": labels,
-            "feature_mean": feature_mean,
-            "feature_std": feature_std,
             "model_type": model_type,
             "num_classes": len(labels),
         },
@@ -192,7 +218,8 @@ def save_artifacts(
 
 
 def train_stage(
-    samples: List[Sample],
+    train_samples: List[Sample],
+    validation_samples: List[Sample] | None,
     labels: List[str],
     output_dir: Path,
     epochs: int,
@@ -200,26 +227,25 @@ def train_stage(
     latent_dim: int,
     class_loss_weight: float,
 ) -> None:
-    dataset = SymbolDataset(samples, labels)
-    model = train_autoencoder(
-        dataset,
+    train_transform = _build_train_transform()
+    train_dataset = SymbolDataset(train_samples, labels, transform=train_transform)
+    validation_dataset = (
+        SymbolDataset(validation_samples, labels) if validation_samples is not None else None
+    )
+    model, history = train_autoencoder(
+        train_dataset,
+        validation_dataset,
         epochs=epochs,
         batch_size=batch_size,
         latent_dim=latent_dim,
         num_classes=len(labels),
         class_loss_weight=class_loss_weight,
     )
-    latents, sample_labels = extract_latents(model, dataset)
+    latents, sample_labels = extract_latents(model, train_dataset)
     latent_scaler = StandardScaler()
     latents_norm = latent_scaler.fit_transform(latents)
-    graph_features = np.stack([extract_graph_features(sample.image) for sample in samples])
-    feature_mean = graph_features.mean(axis=0)
-    feature_std = graph_features.std(axis=0)
-    feature_std[feature_std == 0] = 1.0
-    normalized_features = (graph_features - feature_mean) / feature_std
-    combined = np.concatenate([latents_norm, normalized_features], axis=1)
     components = min(latent_dim, 16)
-    pca, classifier = fit_pca_classifier(combined, sample_labels, components)
+    pca, classifier = fit_pca_classifier(latents_norm, sample_labels, components)
     save_artifacts(
         output_dir,
         model,
@@ -227,17 +253,17 @@ def train_stage(
         classifier,
         latent_dim,
         labels,
-        feature_mean,
-        feature_std,
         latent_scaler,
         model_type="supervised",
     )
     print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
-    save_reconstructions(model, samples, output_dir)
+    save_reconstructions(model, train_samples, output_dir)
+    _save_loss_plot(history, output_dir)
 
 
 def train_pipeline(
-    samples: List[Sample],
+    train_samples: List[Sample],
+    validation_samples: List[Sample],
     labels: List[str],
     output_dir: Path,
     epochs: int = 5,
@@ -245,36 +271,50 @@ def train_pipeline(
     latent_dim: int = 32,
     class_loss_weight: float = 0.3,
 ) -> None:
-    coarse_labels = list_coarse_labels(labels)
-    coarse_samples = [
-        Sample(image=sample.image, label=resolve_coarse_label(sample.label)) for sample in samples
-    ]
-    coarse_dir = output_dir / "coarse"
-    print(f"Training coarse stage with labels: {', '.join(coarse_labels)}")
+    print(f"Training single stage with labels: {', '.join(labels)}")
+    validation_subset = validation_samples if validation_samples else None
     train_stage(
-        coarse_samples,
-        coarse_labels,
-        coarse_dir,
+        train_samples,
+        validation_subset,
+        labels,
+        output_dir,
         epochs=epochs,
         batch_size=batch_size,
         latent_dim=latent_dim,
         class_loss_weight=class_loss_weight,
     )
-    for group in sorted(AMBIGUOUS_COARSE_GROUPS):
-        group_labels = labels_for_coarse_group(group)
-        fine_labels = [label for label in labels if label in group_labels]
-        fine_samples = [sample for sample in samples if sample.label in group_labels]
-        if not fine_samples:
-            print(f"Skipping fine stage for '{group}': no samples found.")
-            continue
-        fine_dir = output_dir / "fine" / group
-        print(f"Training fine stage for '{group}' with labels: {', '.join(fine_labels)}")
-        train_stage(
-            fine_samples,
-            fine_labels,
-            fine_dir,
-            epochs=epochs,
-            batch_size=batch_size,
-            latent_dim=latent_dim,
-            class_loss_weight=class_loss_weight,
-        )
+
+
+def _build_train_transform(noise_std: float = 0.05) -> transforms.Compose:
+    return transforms.Compose(
+        [
+            transforms.RandomAffine(
+                degrees=15,
+                translate=(0.1, 0.1),
+                scale=(0.9, 1.1),
+                interpolation=InterpolationMode.BILINEAR,
+                fill=0,
+            ),
+            transforms.Lambda(
+                lambda tensor: torch.clamp(
+                    tensor + torch.randn_like(tensor) * noise_std, 0.0, 1.0
+                )
+            ),
+        ]
+    )
+
+
+def _save_loss_plot(history: dict[str, list[float]], output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    epochs = range(1, len(history["train_loss"]) + 1)
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, history["train_loss"], label="Training Loss")
+    plt.plot(epochs, history["train_recon_loss"], label="Reconstruction Loss")
+    plt.plot(epochs, history["val_loss"], label="Validation Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training/Validation Loss Curves")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / "loss_curve.png")
+    plt.close()
