@@ -6,16 +6,18 @@ import pickle
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
+import matplotlib
 from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from torch import nn
 from torch.utils.data import DataLoader
+from torchvision import transforms as T
 
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -40,26 +42,79 @@ def describe_device(device: torch.device) -> str:
     return device.type
 
 
+class AddGaussianNoise:
+    def __init__(self, std: float = 0.05):
+        self.std = std
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        noise = torch.randn_like(tensor) * self.std
+        return torch.clamp(tensor + noise, 0.0, 1.0)
+
+
+def build_training_transforms() -> T.Compose:
+    return T.Compose(
+        [
+            T.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1), fill=0),
+            AddGaussianNoise(std=0.06),
+        ]
+    )
+
+
+def plot_loss_curves(history: Dict[str, List[float]], output_dir: Path) -> Path:
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epochs = list(range(1, len(history["train_total"]) + 1))
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, history["train_total"], label="Training loss")
+    plt.plot(epochs, history["train_recon"], label="Reconstruction loss (train)")
+    if history["val_total"]:
+        plt.plot(epochs, history["val_total"], label="Validation loss")
+    if history["val_recon"]:
+        plt.plot(epochs, history["val_recon"], label="Reconstruction loss (val)")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training/Validation Loss Curves")
+    plt.legend()
+    plt.tight_layout()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "loss_curves.png"
+    plt.savefig(output_path)
+    plt.close()
+    return output_path
+
+
 def train_autoencoder(
     dataset: SymbolDataset,
+    val_dataset: SymbolDataset | None = None,
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
     log_interval: int = 0,
     num_classes: int = 1,
     class_loss_weight: float = 0.3,
-) -> SupervisedAutoencoder:
+) -> Tuple[SupervisedAutoencoder, Dict[str, List[float]]]:
     device = resolve_device()
     print(f"Training on device: {describe_device(device)}")
     print(f"Dataset size: {len(dataset)} | Batch size: {batch_size} | Latent dim: {latent_dim}")
     model = SupervisedAutoencoder(latent_dim=latent_dim, num_classes=num_classes).to(device)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     recon_criterion = nn.MSELoss()
     class_criterion = nn.CrossEntropyLoss()
+    history: Dict[str, List[float]] = {
+        "train_total": [],
+        "train_recon": [],
+        "val_total": [],
+        "val_recon": [],
+    }
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
+        running_recon = 0.0
         start = time.perf_counter()
         for step, (inputs, labels) in enumerate(loader, start=1):
             inputs = inputs.to(device)
@@ -72,6 +127,7 @@ def train_autoencoder(
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
+            running_recon += recon_loss.item()
             if epoch == 1 and step == 1:
                 print(
                     "Debug first batch:",
@@ -84,9 +140,37 @@ def train_autoencoder(
                 avg_loss = running_loss / step
                 print(f"Epoch {epoch}/{epochs} | Step {step}/{len(loader)} | Loss {avg_loss:.6f}")
         avg_epoch_loss = running_loss / max(1, len(loader))
+        avg_epoch_recon = running_recon / max(1, len(loader))
+        history["train_total"].append(avg_epoch_loss)
+        history["train_recon"].append(avg_epoch_recon)
+        if val_loader is not None:
+            model.eval()
+            val_running = 0.0
+            val_recon_running = 0.0
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    inputs = inputs.to(device)
+                    labels = labels.to(device)
+                    recon, _, logits = model(inputs)
+                    recon_loss = recon_criterion(recon, inputs)
+                    class_loss = class_criterion(logits, labels)
+                    loss = recon_loss + class_loss_weight * class_loss
+                    val_running += loss.item()
+                    val_recon_running += recon_loss.item()
+            avg_val_loss = val_running / max(1, len(val_loader))
+            avg_val_recon = val_recon_running / max(1, len(val_loader))
+            history["val_total"].append(avg_val_loss)
+            history["val_recon"].append(avg_val_recon)
         duration = time.perf_counter() - start
-        print(f"Epoch {epoch}/{epochs} complete | Avg Loss {avg_epoch_loss:.6f} | {duration:.1f}s")
-    return model
+        if val_loader is not None:
+            print(
+                "Epoch"
+                f" {epoch}/{epochs} complete | Train Loss {avg_epoch_loss:.6f} |"
+                f" Val Loss {avg_val_loss:.6f} | {duration:.1f}s"
+            )
+        else:
+            print(f"Epoch {epoch}/{epochs} complete | Avg Loss {avg_epoch_loss:.6f} | {duration:.1f}s")
+    return model, history
 
 
 def fit_pca_classifier(
@@ -182,24 +266,32 @@ def save_artifacts(
 
 
 def train_stage(
-    samples: List[Sample],
+    train_samples: List[Sample],
+    val_samples: List[Sample],
     labels: List[str],
     output_dir: Path,
     epochs: int,
     batch_size: int,
     latent_dim: int,
     class_loss_weight: float,
+    save_reconstructions_outputs: bool,
 ) -> None:
-    dataset = SymbolDataset(samples, labels)
-    model = train_autoencoder(
-        dataset,
+    train_dataset = SymbolDataset(train_samples, labels, transform=build_training_transforms())
+    val_dataset = SymbolDataset(val_samples, labels)
+    print("Training augmentation: rotate ±15°, translate ±10%, scale ±10%, Gaussian noise std=0.06")
+    model, history = train_autoencoder(
+        train_dataset,
+        val_dataset=val_dataset,
         epochs=epochs,
         batch_size=batch_size,
         latent_dim=latent_dim,
         num_classes=len(labels),
         class_loss_weight=class_loss_weight,
     )
-    latents, sample_labels = extract_latents(model, dataset)
+    loss_curve_path = plot_loss_curves(history, output_dir)
+    print(f"Saved loss curves to: {loss_curve_path}")
+    eval_dataset = SymbolDataset(train_samples, labels)
+    latents, sample_labels = extract_latents(model, eval_dataset)
     latent_scaler = StandardScaler()
     latents_norm = latent_scaler.fit_transform(latents)
     combined = latents_norm
@@ -215,26 +307,31 @@ def train_stage(
         latent_scaler,
         model_type="supervised",
     )
-    print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
-    save_reconstructions(model, samples, output_dir)
+    if save_reconstructions_outputs:
+        print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
+        save_reconstructions(model, train_samples, output_dir)
 
 
 def train_pipeline(
-    samples: List[Sample],
+    train_samples: List[Sample],
+    val_samples: List[Sample],
     labels: List[str],
     output_dir: Path,
     epochs: int = 5,
     batch_size: int = 32,
     latent_dim: int = 32,
     class_loss_weight: float = 0.3,
+    save_reconstructions_outputs: bool = False,
 ) -> None:
     print(f"Training single-stage classifier with labels: {', '.join(labels)}")
     train_stage(
-        samples,
+        train_samples,
+        val_samples,
         labels,
         output_dir,
         epochs=epochs,
         batch_size=batch_size,
         latent_dim=latent_dim,
         class_loss_weight=class_loss_weight,
+        save_reconstructions_outputs=save_reconstructions_outputs,
     )

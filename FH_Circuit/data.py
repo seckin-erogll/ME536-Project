@@ -172,6 +172,74 @@ def load_training_dataset(dataset_dir: Path, size: int = IMAGE_SIZE) -> Tuple[Li
     return samples, labels
 
 
+def ensure_train_val_split(dataset_dir: Path, train_ratio: float = 0.8, seed: int = 42) -> None:
+    image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    rng = random.Random(seed)
+
+    for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
+        if not class_dir.is_dir():
+            continue
+        train_dir = class_dir / "train"
+        val_dir = class_dir / "validation"
+        images = [
+            path
+            for path in class_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in image_extensions
+        ]
+        if not images and (train_dir.exists() or val_dir.exists()):
+            continue
+        if not images:
+            continue
+        rng.shuffle(images)
+        split_idx = max(1, int(len(images) * train_ratio))
+        if len(images) > 1:
+            split_idx = min(len(images) - 1, split_idx)
+        train_dir.mkdir(parents=True, exist_ok=True)
+        val_dir.mkdir(parents=True, exist_ok=True)
+        for image_path in images[:split_idx]:
+            image_path.replace(train_dir / image_path.name)
+        for image_path in images[split_idx:]:
+            image_path.replace(val_dir / image_path.name)
+
+
+def load_split_datasets(
+    dataset_dir: Path, size: int = IMAGE_SIZE
+) -> Tuple[List[Sample], List[Sample], List[str]]:
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"Dataset directory not found: {dataset_dir}")
+
+    samples_train: List[Sample] = []
+    samples_val: List[Sample] = []
+    labels: List[str] = []
+    image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+    for class_dir in sorted(dataset_dir.iterdir(), key=lambda entry: entry.name.lower()):
+        if not class_dir.is_dir():
+            continue
+        label = class_dir.name.strip()
+        if not label:
+            continue
+        labels.append(label)
+        for split_name, target in (("train", samples_train), ("validation", samples_val)):
+            split_dir = class_dir / split_name
+            if not split_dir.exists():
+                continue
+            for image_path in split_dir.iterdir():
+                if image_path.suffix.lower() not in image_extensions:
+                    continue
+                image = Image.open(image_path).convert("L")
+                image = image.resize((size, size), resample=Image.BILINEAR)
+                target.append(Sample(image=np.array(image), label=label))
+
+    if not samples_train:
+        raise ValueError("No training samples found. Check dataset directory structure and labels.")
+    if not samples_val:
+        raise ValueError("No validation samples found. Check dataset directory structure and labels.")
+    random.shuffle(samples_train)
+    random.shuffle(samples_val)
+    return samples_train, samples_val, labels
+
+
 def save_samples(samples: List[Sample], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for idx, sample in enumerate(samples):

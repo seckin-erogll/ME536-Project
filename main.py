@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
-from FH_Circuit.data import load_training_dataset
+from FH_Circuit.data import ensure_train_val_split, load_split_datasets
 from FH_Circuit.gui import launch_gui
 from FH_Circuit.train import train_pipeline
 
@@ -62,20 +62,29 @@ def run_train(args: argparse.Namespace) -> None:
         args.latent_dim = _prompt_int("Latent dimension", args.latent_dim)
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
         args.output = _prompt_path("Output directory", args.output)
-    samples, labels = load_training_dataset(args.dataset_dir)
+    ensure_train_val_split(args.dataset_dir)
+    train_samples, val_samples, labels = load_split_datasets(args.dataset_dir)
     label_counts = {label: 0 for label in labels}
-    for sample in samples:
+    val_counts = {label: 0 for label in labels}
+    for sample in train_samples:
         label_counts[sample.label] += 1
+    for sample in val_samples:
+        val_counts[sample.label] += 1
     print("Loaded training data:")
     for label in labels:
-        print(f"  - {label}: {label_counts[label]} samples")
+        print(
+            f"  - {label}: {label_counts[label]} train samples,"
+            f" {val_counts[label]} validation samples"
+        )
     train_pipeline(
-        samples,
+        train_samples,
+        val_samples,
         labels,
         output_dir=args.output,
         epochs=args.epochs,
         batch_size=args.batch_size,
         latent_dim=args.latent_dim,
+        save_reconstructions_outputs=args.save_reconstructions,
     )
     print(f"Training complete. Artifacts saved to {args.output}.")
 
@@ -118,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the training dataset directory.",
     )
     train.add_argument("--output", type=Path, default=Path("./artifacts"), help="Output folder.")
+    train.add_argument(
+        "--save-reconstructions",
+        action="store_true",
+        help="Save reconstruction images after training.",
+    )
     train.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     train.set_defaults(func=run_train, prompt=True)
 
