@@ -6,7 +6,7 @@ import dataclasses
 import pickle
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -18,9 +18,8 @@ if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
-from FH_Circuit.data import AMBIGUOUS_COARSE_GROUPS, labels_for_coarse_group
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
-from FH_Circuit.preprocess import extract_graph_features_from_binary, preprocess
+from FH_Circuit.preprocess import preprocess
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,15 +28,7 @@ class StageArtifacts:
     pca: PCA
     classifier: SVC
     labels: List[str]
-    feature_mean: np.ndarray
-    feature_std: np.ndarray
     latent_scaler: StandardScaler
-
-
-@dataclasses.dataclass(frozen=True)
-class TwoStageArtifacts:
-    coarse: StageArtifacts
-    fine: Dict[str, StageArtifacts]
 
 
 def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
@@ -57,11 +48,6 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         model = ConvAutoencoder(latent_dim=checkpoint["latent_dim"])
     model.load_state_dict(checkpoint["state_dict"])
     labels = checkpoint["labels"]
-    feature_mean = checkpoint.get("feature_mean")
-    feature_std = checkpoint.get("feature_std")
-    if feature_mean is None or feature_std is None:
-        feature_mean = np.zeros(6, dtype=np.float32)
-        feature_std = np.ones(6, dtype=np.float32)
     with (model_dir / "pca.pkl").open("rb") as file:
         pca = pickle.load(file)
     with (model_dir / "classifier.pkl").open("rb") as file:
@@ -82,24 +68,12 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         pca=pca,
         classifier=classifier,
         labels=labels,
-        feature_mean=np.array(feature_mean, dtype=np.float32),
-        feature_std=np.array(feature_std, dtype=np.float32),
         latent_scaler=latent_scaler,
     )
 
 
-def load_artifacts(model_dir: Path) -> TwoStageArtifacts:
-    coarse_dir = model_dir / "coarse"
-    if coarse_dir.exists():
-        coarse = _load_stage_artifacts(coarse_dir)
-        fine_artifacts: Dict[str, StageArtifacts] = {}
-        for group in AMBIGUOUS_COARSE_GROUPS:
-            group_dir = model_dir / "fine" / group
-            if group_dir.exists():
-                fine_artifacts[group] = _load_stage_artifacts(group_dir)
-        return TwoStageArtifacts(coarse=coarse, fine=fine_artifacts)
-    legacy = _load_stage_artifacts(model_dir)
-    return TwoStageArtifacts(coarse=legacy, fine={})
+def load_artifacts(model_dir: Path) -> StageArtifacts:
+    return _load_stage_artifacts(model_dir)
 
 
 def _predict_label(
@@ -120,17 +94,16 @@ def _predict_label(
 
 
 def classify_sketch(
-    artifacts: TwoStageArtifacts,
+    artifacts: StageArtifacts,
     sketch: np.ndarray,
     error_threshold: float = ERROR_THRESHOLD,
     ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
 ) -> str:
     processed = preprocess(sketch)
-    graph_features = extract_graph_features_from_binary(processed)
     tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
-    artifacts.coarse.model.eval()
+    artifacts.model.eval()
     with torch.no_grad():
-        outputs = artifacts.coarse.model(tensor)
+        outputs = artifacts.model(tensor)
         if len(outputs) == 2:
             recon, latent = outputs
         else:
@@ -138,31 +111,9 @@ def classify_sketch(
     recon_error = torch.mean((recon - tensor) ** 2).item()
     if recon_error > error_threshold:
         return "Novelty detected: unknown component."
-    normalized_latent = artifacts.coarse.latent_scaler.transform(latent.cpu().numpy())
-    normalized_features = (graph_features - artifacts.coarse.feature_mean) / artifacts.coarse.feature_std
-    combined = np.concatenate([normalized_latent, normalized_features[None, :]], axis=1)
-    reduced = artifacts.coarse.pca.transform(combined)
-    coarse_label, coarse_ambiguous = _predict_label(artifacts.coarse, reduced, ambiguity_threshold)
-    if coarse_ambiguous or not coarse_label:
+    normalized_latent = artifacts.latent_scaler.transform(latent.cpu().numpy())
+    reduced = artifacts.pca.transform(normalized_latent)
+    label, ambiguous = _predict_label(artifacts, reduced, ambiguity_threshold)
+    if ambiguous or not label:
         return "Ambiguity detected: ask user to clarify between closest symbols."
-    if coarse_label in AMBIGUOUS_COARSE_GROUPS and coarse_label in artifacts.fine:
-        fine_stage = artifacts.fine[coarse_label]
-        fine_stage.model.eval()
-        with torch.no_grad():
-            fine_outputs = fine_stage.model(tensor)
-            if len(fine_outputs) == 2:
-                _, fine_latent = fine_outputs
-            else:
-                _, fine_latent, _ = fine_outputs
-        normalized_fine_latent = fine_stage.latent_scaler.transform(fine_latent.cpu().numpy())
-        fine_features = (graph_features - fine_stage.feature_mean) / fine_stage.feature_std
-        fine_combined = np.concatenate([normalized_fine_latent, fine_features[None, :]], axis=1)
-        fine_reduced = fine_stage.pca.transform(fine_combined)
-        fine_label, fine_ambiguous = _predict_label(fine_stage, fine_reduced, ambiguity_threshold)
-        if fine_ambiguous or not fine_label:
-            return "Ambiguity detected: ask user to clarify between closest symbols."
-        return f"Detected: {fine_label}"
-    fine_labels = labels_for_coarse_group(coarse_label)
-    if len(fine_labels) == 1:
-        return f"Detected: {fine_labels[0]}"
-    return f"Detected: {coarse_label}"
+    return f"Detected: {label}"

@@ -4,81 +4,21 @@ from __future__ import annotations
 
 import numpy as np
 from PIL import Image
-from skimage import filters, morphology
 
 from FH_Circuit.config import IMAGE_SIZE, MIN_AREA
 
 
 def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
-    thresh = filters.threshold_otsu(image)
+    thresh = _otsu_threshold(image)
     binary = (image > thresh).astype(np.uint8)
     if binary.sum() < min_area:
         raise ValueError("Noise detected: sketch too small.")
     binary = _normalize_to_canvas(binary)
     binary = _center_of_mass_align(binary)
-    footprint = morphology.disk(2)
-    dilated = morphology.dilation(binary, footprint=footprint)
-    closed = morphology.closing(dilated, footprint=footprint)
+    offsets = _disk_offsets(2)
+    dilated = _binary_dilation(binary, offsets)
+    closed = _binary_closing(dilated, offsets)
     return closed.astype(np.float32)
-
-
-def extract_graph_features(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
-    processed = preprocess(image, min_area=min_area)
-    return extract_graph_features_from_binary(processed)
-
-
-def extract_graph_features_from_binary(binary: np.ndarray) -> np.ndarray:
-    skeleton = morphology.skeletonize(binary > 0)
-    coords = np.column_stack(np.where(skeleton))
-    if coords.size == 0:
-        return np.zeros(6, dtype=np.float32)
-    skeleton_set = {tuple(coord) for coord in coords}
-    neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-
-    def neighbor_coords(point: tuple[int, int]) -> list[tuple[int, int]]:
-        row, col = point
-        return [
-            (row + dr, col + dc)
-            for dr, dc in neighbors
-            if (row + dr, col + dc) in skeleton_set
-        ]
-
-    degrees = {point: len(neighbor_coords(point)) for point in skeleton_set}
-    endpoints = [point for point, degree in degrees.items() if degree == 1]
-    junctions = [point for point, degree in degrees.items() if degree >= 3]
-    nodes = set(endpoints + junctions)
-    edge_lengths: list[int] = []
-    visited_steps: set[tuple[tuple[int, int], tuple[int, int]]] = set()
-
-    for node in nodes:
-        for neighbor in neighbor_coords(node):
-            step = (node, neighbor)
-            if step in visited_steps:
-                continue
-            length = 1
-            prev = node
-            current = neighbor
-            visited_steps.add(step)
-            while current not in nodes:
-                next_candidates = [cand for cand in neighbor_coords(current) if cand != prev]
-                if not next_candidates:
-                    break
-                next_point = next_candidates[0]
-                visited_steps.add((current, next_point))
-                prev, current = current, next_point
-                length += 1
-            edge_lengths.append(length)
-
-    total_pixels = len(skeleton_set)
-    num_endpoints = len(endpoints)
-    num_junctions = len(junctions)
-    avg_edge_length = float(np.mean(edge_lengths)) if edge_lengths else 0.0
-    max_edge_length = float(np.max(edge_lengths)) if edge_lengths else 0.0
-    mean_degree = float(np.mean(list(degrees.values()))) if degrees else 0.0
-    return np.array(
-        [total_pixels, num_endpoints, num_junctions, avg_edge_length, max_edge_length, mean_degree],
-        dtype=np.float32,
-    )
 
 
 def _normalize_to_canvas(binary: np.ndarray) -> np.ndarray:
@@ -120,3 +60,58 @@ def _center_of_mass_align(binary: np.ndarray) -> np.ndarray:
     elif shift[1] < 0:
         shifted[:, shift[1] :] = 0
     return shifted
+
+
+def _otsu_threshold(image: np.ndarray) -> float:
+    flattened = image.astype(np.uint8).ravel()
+    hist = np.bincount(flattened, minlength=256).astype(np.float64)
+    total = flattened.size
+    if total == 0:
+        return 0.0
+    cumulative = np.cumsum(hist)
+    cumulative_mean = np.cumsum(hist * np.arange(256))
+    total_mean = cumulative_mean[-1]
+    numerator = (total_mean * cumulative - cumulative_mean) ** 2
+    denominator = cumulative * (total - cumulative)
+    denominator[denominator == 0] = 1
+    sigma_b_squared = numerator / denominator
+    return float(np.argmax(sigma_b_squared))
+
+
+def _disk_offsets(radius: int) -> list[tuple[int, int]]:
+    offsets = []
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy * dy + dx * dx <= radius * radius:
+                offsets.append((dy, dx))
+    return offsets
+
+
+def _binary_dilation(binary: np.ndarray, offsets: list[tuple[int, int]]) -> np.ndarray:
+    height, width = binary.shape
+    radius = max(max(abs(dy), abs(dx)) for dy, dx in offsets + [(0, 0)])
+    padded = np.pad(binary, radius, mode="constant", constant_values=0)
+    result = np.zeros_like(binary)
+    for dy, dx in offsets:
+        result = np.maximum(
+            result,
+            padded[radius + dy : radius + dy + height, radius + dx : radius + dx + width],
+        )
+    return result
+
+
+def _binary_erosion(binary: np.ndarray, offsets: list[tuple[int, int]]) -> np.ndarray:
+    height, width = binary.shape
+    radius = max(max(abs(dy), abs(dx)) for dy, dx in offsets + [(0, 0)])
+    padded = np.pad(binary, radius, mode="constant", constant_values=0)
+    result = np.ones_like(binary)
+    for dy, dx in offsets:
+        result = np.minimum(
+            result,
+            padded[radius + dy : radius + dy + height, radius + dx : radius + dx + width],
+        )
+    return result
+
+
+def _binary_closing(binary: np.ndarray, offsets: list[tuple[int, int]]) -> np.ndarray:
+    return _binary_erosion(_binary_dilation(binary, offsets), offsets)

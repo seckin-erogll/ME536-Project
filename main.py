@@ -62,15 +62,18 @@ def run_train(args: argparse.Namespace) -> None:
         args.latent_dim = _prompt_int("Latent dimension", args.latent_dim)
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
         args.output = _prompt_path("Output directory", args.output)
-    samples, labels = load_training_dataset(args.dataset_dir)
+    train_samples, validation_samples, labels = load_training_dataset(args.dataset_dir)
     label_counts = {label: 0 for label in labels}
-    for sample in samples:
+    for sample in train_samples:
         label_counts[sample.label] += 1
     print("Loaded training data:")
     for label in labels:
         print(f"  - {label}: {label_counts[label]} samples")
+    if validation_samples:
+        print(f"Loaded validation data: {len(validation_samples)} samples")
     train_pipeline(
-        samples,
+        train_samples,
+        validation_samples,
         labels,
         output_dir=args.output,
         epochs=args.epochs,
