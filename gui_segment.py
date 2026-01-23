@@ -97,9 +97,9 @@ class CircuitSegmentationApp:
             x, y, w, h = cv2.boundingRect(contour)
             cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
-        if contour_display := cv2.cvtColor(density_map, cv2.COLOR_GRAY2BGR):
-            cv2.imshow("Density Map", contour_display)
-            cv2.waitKey(1)
+        contour_display = cv2.cvtColor(density_map, cv2.COLOR_GRAY2BGR)
+        cv2.imshow("Density Map", contour_display)
+        cv2.waitKey(1)
 
         self._update_canvas_from_array(boxed)
 
