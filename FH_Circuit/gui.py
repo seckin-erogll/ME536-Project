@@ -82,16 +82,16 @@ class SketchGUI:
         self._show_random_example(None)
 
     def on_press(self, event: tk.Event) -> None:
-        self.last_x = event.x
-        self.last_y = event.y
+        self.last_x, self.last_y = self._canvas_to_image(event.x, event.y)
 
     def on_drag(self, event: tk.Event) -> None:
         if self.last_x is None or self.last_y is None:
             return
-        self.draw.line((self.last_x, self.last_y, event.x, event.y), fill=255, width=6)
+        img_x, img_y = self._canvas_to_image(event.x, event.y)
+        self.draw.line((self.last_x, self.last_y, img_x, img_y), fill=255, width=6)
         self.set_image(self.image)
-        self.last_x = event.x
-        self.last_y = event.y
+        self.last_x = img_x
+        self.last_y = img_y
 
     def on_release(self, _event: tk.Event) -> None:
         self.last_x = None
@@ -184,6 +184,16 @@ class SketchGUI:
 
     def clear_bboxes(self) -> None:
         self.canvas.delete("bbox")
+
+    def _canvas_to_image(self, canvas_x: float, canvas_y: float) -> tuple[float, float]:
+        image_width, image_height = self.image.size
+        if self.scale <= 0:
+            return canvas_x, canvas_y
+        img_x = (canvas_x - self.offset_x) / self.scale
+        img_y = (canvas_y - self.offset_y) / self.scale
+        img_x = min(max(img_x, 0.0), image_width - 1)
+        img_y = min(max(img_y, 0.0), image_height - 1)
+        return img_x, img_y
 
     def _load_example_paths(self) -> dict[str, list[Path]]:
         examples: dict[str, list[Path]] = {}
