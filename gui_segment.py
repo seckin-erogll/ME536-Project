@@ -79,6 +79,7 @@ class CircuitSegmentationApp:
         gray = np.array(self.image.convert("L"))
 
         inverted = 255 - gray
+        bin_img = (inverted > 0).astype(np.uint8) * 255
 
         density_map = cv2.blur(inverted, (40, 40))
 
@@ -95,6 +96,8 @@ class CircuitSegmentationApp:
             if area < 500:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
+            x, y, w, h = self._refine_bbox_by_projections(bin_img, x, y, w, h, pad=10)
+            x, y, w, h = self._expand_bbox(x, y, w, h, 1.10, gray.shape[1], gray.shape[0])
             cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
         contour_display = cv2.cvtColor(density_map, cv2.COLOR_GRAY2BGR)
@@ -102,6 +105,69 @@ class CircuitSegmentationApp:
         cv2.waitKey(1)
 
         self._update_canvas_from_array(boxed)
+
+    def _clamp_bbox(self, x0, y0, x1, y1, width, height):
+        x0 = max(0, min(x0, width - 1))
+        y0 = max(0, min(y0, height - 1))
+        x1 = max(0, min(x1, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        return x0, y0, x1, y1
+
+    def _refine_bbox_by_projections(self, bin_img, x, y, w, h, pad=10):
+        height, width = bin_img.shape[:2]
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(width, x + w + pad)
+        y1 = min(height, y + h + pad)
+        crop = bin_img[y0:y1, x0:x1]
+        if crop.size == 0:
+            return x, y, w, h
+
+        active_mask = crop > 0
+        col_sum = np.count_nonzero(active_mask, axis=0)
+        row_sum = np.count_nonzero(active_mask, axis=1)
+
+        col_thresh = max(3, int(0.02 * crop.shape[0]))
+        row_thresh = max(3, int(0.02 * crop.shape[1]))
+
+        active_cols = np.where(col_sum >= col_thresh)[0]
+        active_rows = np.where(row_sum >= row_thresh)[0]
+
+        if active_cols.size == 0 or active_rows.size == 0:
+            return x, y, w, h
+
+        crop_x0 = int(active_cols[0])
+        crop_x1 = int(active_cols[-1])
+        crop_y0 = int(active_rows[0])
+        crop_y1 = int(active_rows[-1])
+
+        ref_x0 = x0 + crop_x0
+        ref_y0 = y0 + crop_y0
+        ref_x1 = x0 + crop_x1
+        ref_y1 = y0 + crop_y1
+
+        ref_x0, ref_y0, ref_x1, ref_y1 = self._clamp_bbox(
+            ref_x0, ref_y0, ref_x1, ref_y1, width, height
+        )
+        return ref_x0, ref_y0, ref_x1 - ref_x0 + 1, ref_y1 - ref_y0 + 1
+
+    def _expand_bbox(self, x, y, w, h, scale, width, height):
+        if w <= 0 or h <= 0:
+            return x, y, w, h
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        x0 = int(round(cx - new_w / 2.0))
+        y0 = int(round(cy - new_h / 2.0))
+        x1 = x0 + new_w - 1
+        y1 = y0 + new_h - 1
+        x0, y0, x1, y1 = self._clamp_bbox(x0, y0, x1, y1, width, height)
+        return x0, y0, x1 - x0 + 1, y1 - y0 + 1
 
     def _update_canvas_from_array(self, array_bgr):
         array_rgb = cv2.cvtColor(array_bgr, cv2.COLOR_BGR2RGB)
