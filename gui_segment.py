@@ -129,7 +129,7 @@ class CircuitSegmentationApp:
 
         self._update_canvas_from_array(boxed)
 
-    def _refine_bbox_by_pixels(self, bin_img, x, y, w, h, pad=10, close_k=5, close_iter=1):
+    def _refine_bbox_by_pixels(self, bin_img, x, y, w, h, pad=25, close_k=5, close_iter=1):
         """
         Take ROI from bin_img (0/255). Pad it.
         Apply morphological closing (cv2.morphologyEx with MORPH_CLOSE) using a small kernel (close_k x close_k).
