@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from circuit_gui import launch_circuit_gui
 from FH_Circuit.classify import classify_sketch, load_artifacts
 from FH_Circuit.data import ensure_train_val_split, load_split_datasets
 from FH_Circuit.gui import launch_gui
@@ -112,6 +113,13 @@ def run_classify(args: argparse.Namespace) -> None:
     print(result)
 
 
+def run_circuit_gui(args: argparse.Namespace) -> None:
+    if args.prompt:
+        print("Enter circuit GUI parameters (press Enter to accept defaults).")
+        args.model_dir = _prompt_path("Model directory", args.model_dir)
+    launch_circuit_gui(args.model_dir)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Auto-Schematic pipeline.")
     subparsers = parser.add_subparsers(dest="command")
@@ -146,6 +154,19 @@ def build_parser() -> argparse.ArgumentParser:
     gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     gui.set_defaults(func=run_gui, prompt=True)
 
+    circuit_gui = subparsers.add_parser(
+        "circuit-gui",
+        help="Launch the circuit segmentation + classification GUI.",
+    )
+    circuit_gui.add_argument(
+        "--model-dir",
+        type=Path,
+        default=Path("./artifacts"),
+        help="Model artifacts folder.",
+    )
+    circuit_gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
+    circuit_gui.set_defaults(func=run_circuit_gui, prompt=True)
+
     classify = subparsers.add_parser("classify", help="Classify a sketch image.")
     classify.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
     classify.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
@@ -159,7 +180,15 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.command is None:
-        choice = _prompt_choice("Select mode", {"train": "Train", "gui": "GUI", "classify": "Classify"})
+        choice = _prompt_choice(
+            "Select mode",
+            {
+                "train": "Train",
+                "gui": "GUI",
+                "classify": "Classify",
+                "circuit-gui": "Circuit GUI",
+            },
+        )
         args = parser.parse_args([choice])
     args.func(args)
 
