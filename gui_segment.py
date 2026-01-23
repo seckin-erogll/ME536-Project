@@ -96,7 +96,7 @@ class CircuitSegmentationApp:
             if area < 500:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
-            x, y, w, h = self._refine_bbox_by_projections(bin_img, x, y, w, h, pad=10)
+            x, y, w, h = self._refine_bbox_by_pixels(bin_img, x, y, w, h, pad=10)
             height, width = bin_img.shape[:2]
             x0 = max(0, x)
             y0 = max(0, y)
@@ -128,6 +128,40 @@ class CircuitSegmentationApp:
         cv2.waitKey(1)
 
         self._update_canvas_from_array(boxed)
+
+    def _refine_bbox_by_pixels(self, bin_img, x, y, w, h, pad=25, close_k=5, close_iter=1):
+        """
+        Take ROI from bin_img (0/255). Pad it.
+        Apply morphological closing (cv2.morphologyEx with MORPH_CLOSE) using a small kernel (close_k x close_k).
+        Compute tight bbox from actual nonzero pixels (cv2.findNonZero or np.where).
+        Return refined bbox in FULL-image coordinates (x,y,w,h).
+        If no pixels, return original bbox.
+        """
+        height, width = bin_img.shape[:2]
+        x0 = max(0, x - pad)
+        y0 = max(0, y - pad)
+        x1 = min(width, x + w + pad)
+        y1 = min(height, y + h + pad)
+        crop = bin_img[y0:y1, x0:x1]
+        if crop.size == 0:
+            return x, y, w, h
+
+        kernel = np.ones((close_k, close_k), np.uint8)
+        closed = cv2.morphologyEx(crop, cv2.MORPH_CLOSE, kernel, iterations=close_iter)
+        ys, xs = np.where(closed > 0)
+        if xs.size == 0 or ys.size == 0:
+            return x, y, w, h
+
+        crop_x0, crop_x1 = xs.min(), xs.max()
+        crop_y0, crop_y1 = ys.min(), ys.max()
+        ref_x0 = x0 + int(crop_x0)
+        ref_y0 = y0 + int(crop_y0)
+        ref_x1 = x0 + int(crop_x1)
+        ref_y1 = y0 + int(crop_y1)
+        ref_x0, ref_y0, ref_x1, ref_y1 = self._clamp_bbox(
+            ref_x0, ref_y0, ref_x1, ref_y1, width, height
+        )
+        return ref_x0, ref_y0, ref_x1 - ref_x0 + 1, ref_y1 - ref_y0 + 1
 
     def _clamp_bbox(self, x0, y0, x1, y1, width, height):
         x0 = max(0, min(x0, width - 1))
