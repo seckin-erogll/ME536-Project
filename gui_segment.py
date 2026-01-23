@@ -5,6 +5,50 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
+HOUGH_CANNY1 = 50
+HOUGH_CANNY2 = 150
+HOUGH_THRESH = 60
+MIN_LINE_LEN = 80
+MAX_LINE_GAP = 10
+ANGLE_TOL_DEG = 12
+WIRE_THICKNESS = 8
+
+
+def detect_wires_hough(bw: np.ndarray):
+    kernel = np.ones((3, 3), np.uint8)
+    closed = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, kernel, iterations=1)
+    edges = cv2.Canny(closed, HOUGH_CANNY1, HOUGH_CANNY2)
+
+    raw_lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=HOUGH_THRESH,
+        minLineLength=MIN_LINE_LEN,
+        maxLineGap=MAX_LINE_GAP,
+    )
+
+    line_mask = np.zeros_like(bw)
+    kept_lines = []
+    if raw_lines is None:
+        return line_mask, kept_lines
+
+    for line in raw_lines:
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        length = np.hypot(dx, dy)
+        if length < MIN_LINE_LEN:
+            continue
+        angle = abs(np.degrees(np.arctan2(dy, dx)))
+        if angle > 90:
+            angle = 180 - angle
+        if angle < ANGLE_TOL_DEG or abs(angle - 90) < ANGLE_TOL_DEG:
+            kept_lines.append((x1, y1, x2, y2))
+            cv2.line(line_mask, (x1, y1), (x2, y2), 255, WIRE_THICKNESS)
+
+    return line_mask, kept_lines
+
 
 class CircuitSegmentationApp:
     def __init__(self, root):
@@ -78,33 +122,11 @@ class CircuitSegmentationApp:
     def segment_components(self):
         gray = np.array(self.image.convert("L"))
 
-        inverted = 255 - gray
-        density_map = cv2.blur(inverted, (40, 40))
+        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        line_mask, wire_lines = detect_wires_hough(bw)
+        bw_no_wires = cv2.bitwise_and(bw, cv2.bitwise_not(line_mask))
 
-        grabcut_mask = np.full(gray.shape, cv2.GC_PR_BGD, dtype=np.uint8)
-        grabcut_mask[density_map < 10] = cv2.GC_BGD
-        grabcut_mask[density_map > 50] = cv2.GC_PR_FGD
-
-        bgd_model = np.zeros((1, 65), np.float64)
-        fgd_model = np.zeros((1, 65), np.float64)
-        color_input = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        cv2.grabCut(
-            color_input,
-            grabcut_mask,
-            None,
-            bgd_model,
-            fgd_model,
-            5,
-            cv2.GC_INIT_WITH_MASK,
-        )
-
-        final_mask = np.where(
-            (grabcut_mask == cv2.GC_FGD) | (grabcut_mask == cv2.GC_PR_FGD),
-            255,
-            0,
-        ).astype(np.uint8)
-
-        contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(bw_no_wires, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         boxed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         for contour in contours:
@@ -114,14 +136,14 @@ class CircuitSegmentationApp:
             x, y, w, h = cv2.boundingRect(contour)
             cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
-        seed_vis = np.full(gray.shape, 127, dtype=np.uint8)
-        seed_vis[grabcut_mask == cv2.GC_BGD] = 0
-        seed_vis[grabcut_mask == cv2.GC_PR_FGD] = 255
-        seed_vis[grabcut_mask == cv2.GC_FGD] = 255
+        overlay = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        for x1, y1, x2, y2 in wire_lines:
+            cv2.line(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        cv2.imshow("1. Density Input", density_map)
-        cv2.imshow("2. GrabCut Seeding", seed_vis)
-        cv2.imshow("3. Final Cut", final_mask)
+        cv2.imshow("BW", bw)
+        cv2.imshow("Wire Mask", line_mask)
+        cv2.imshow("BW no wires", bw_no_wires)
+        cv2.imshow("Wire Overlay", overlay)
         cv2.waitKey(1)
 
         self._update_canvas_from_array(boxed)
