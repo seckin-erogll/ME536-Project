@@ -83,8 +83,8 @@ class CircuitSegmentationApp:
         max_expand_steps = 10
         corner_density_low = 0.0004
         corner_density_high = 0.0012
-        stub_len_px = 45
-        stub_r = 25
+        stub_len_px = 30
+        stub_r = 12
         pad_factor = 1.10
         line_min_length = 60
         line_thickness = 6
@@ -162,7 +162,7 @@ class CircuitSegmentationApp:
                     line_min_length,
                     line_thickness,
                 )
-                tightened = self._tighten_bbox(
+                tightened = self._tighten_bbox_by_protected_cc(
                     roi_clean, protect_mask, (x1, y1, x2, y2)
                 )
                 final_bbox = self._pad_bbox(
@@ -311,9 +311,30 @@ class CircuitSegmentationApp:
         roi_clean[erase_mask > 0] = 0
         return roi_clean
 
-    def _tighten_bbox(self, roi_clean, protect_mask, original_bbox):
+    def _tighten_bbox_by_protected_cc(self, roi_clean, protect_mask, original_bbox):
         combined = cv2.bitwise_or(roi_clean, protect_mask)
-        ys, xs = np.where(combined > 0)
+        if cv2.countNonZero(combined) == 0:
+            return original_bbox
+        count, labels = cv2.connectedComponents((combined > 0).astype(np.uint8))
+        if count <= 1:
+            ys, xs = np.where(combined > 0)
+            if xs.size == 0 or ys.size == 0:
+                return original_bbox
+            min_x = int(xs.min()) + original_bbox[0]
+            max_x = int(xs.max()) + original_bbox[0]
+            min_y = int(ys.min()) + original_bbox[1]
+            max_y = int(ys.max()) + original_bbox[1]
+            return (min_x, min_y, max_x, max_y)
+        best_label = None
+        best_overlap = 0
+        for label in range(1, count):
+            overlap = int(np.sum((labels == label) & (protect_mask > 0)))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_label = label
+        if best_label is None or best_overlap == 0:
+            return original_bbox
+        ys, xs = np.where(labels == best_label)
         if xs.size == 0 or ys.size == 0:
             return original_bbox
         min_x = int(xs.min()) + original_bbox[0]
