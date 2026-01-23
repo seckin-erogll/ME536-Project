@@ -5,7 +5,6 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 from sklearn.cluster import DBSCAN
-from collections import deque
 
 
 class CircuitSegmentationApp:
@@ -84,10 +83,8 @@ class CircuitSegmentationApp:
         corner_density_low = 0.0004
         corner_density_high = 0.0012
         stub_len_px = 30
-        stub_r = 12
         pad_factor = 1.10
-        line_min_length = 60
-        line_thickness = 6
+        core_margin = int(1.5 * eps)
 
         gray = np.array(self.image.convert("L"))
         binary = self._binarize(gray)
@@ -148,26 +145,32 @@ class CircuitSegmentationApp:
                 if is_junction or not is_component:
                     continue
 
-                roi_bin = binary[y1 : y2 + 1, x1 : x2 + 1]
+                seed_bbox = (min_x, min_y, max_x, max_y)
+                core_bbox = self._refine_core_bbox_by_local_cc(
+                    binary, seed_bbox, core_margin, (width, height)
+                )
                 roi_skel = skeleton[y1 : y2 + 1, x1 : x2 + 1]
                 exit_points = self._get_exit_points(roi_skel)
-                exit_points_img = [(x1 + x, y1 + y) for x, y in exit_points]
-                protect_mask = self._stub_mask_from_exits(
-                    roi_skel, exit_points, stub_len_px, stub_r
-                )
-                roi_clean = self._remove_long_lines(
-                    roi_bin,
-                    roi_skel,
-                    protect_mask,
-                    line_min_length,
-                    line_thickness,
-                )
-                tightened = self._tighten_bbox_by_protected_cc(
-                    roi_clean, protect_mask, (x1, y1, x2, y2)
-                )
-                final_bbox = self._pad_bbox(
-                    tightened, pad_factor, (width, height), exit_points_img
-                )
+                exit_points = self._pick_two_farthest_points(exit_points)
+                if len(exit_points) == 2:
+                    exit_points_img = [(x1 + x, y1 + y) for x, y in exit_points]
+                    sides = self._exit_sides_from_points(
+                        exit_points, roi_skel.shape[1], roi_skel.shape[0]
+                    )
+                    extended = self._extend_bbox_by_sides(
+                        core_bbox,
+                        sides,
+                        stub_len_px,
+                        (x1, y1, x2, y2),
+                        (width, height),
+                    )
+                    final_bbox = self._pad_bbox_centered(
+                        extended, pad_factor, (width, height), exit_points_img
+                    )
+                else:
+                    final_bbox = self._pad_bbox_centered(
+                        core_bbox, pad_factor, (width, height)
+                    )
                 fx1, fy1, fx2, fy2 = final_bbox
                 cv2.rectangle(boxed, (fx1, fy1), (fx2, fy2), (0, 0, 255), 2)
 
@@ -255,95 +258,112 @@ class CircuitSegmentationApp:
             points.append((cx, cy))
         return points
 
-    def _stub_mask_from_exits(self, roi_skeleton, exit_points, stub_len_px, stub_r):
-        h, w = roi_skeleton.shape
-        protect_mask = np.zeros((h, w), dtype=np.uint8)
-        if not exit_points:
-            return protect_mask
-        skel = (roi_skeleton > 0).astype(np.uint8)
-        for x0, y0 in exit_points:
-            if x0 < 0 or y0 < 0 or x0 >= w or y0 >= h:
-                continue
-            distances = -np.ones((h, w), dtype=np.int32)
-            queue = deque([(x0, y0)])
-            distances[y0, x0] = 0
-            while queue:
-                x, y = queue.popleft()
-                if distances[y, x] >= stub_len_px:
-                    continue
-                for dy in (-1, 0, 1):
-                    for dx in (-1, 0, 1):
-                        if dx == 0 and dy == 0:
-                            continue
-                        nx = x + dx
-                        ny = y + dy
-                        if nx < 0 or ny < 0 or nx >= w or ny >= h:
-                            continue
-                        if skel[ny, nx] == 0:
-                            continue
-                        if distances[ny, nx] != -1:
-                            continue
-                        distances[ny, nx] = distances[y, x] + 1
-                        queue.append((nx, ny))
-            protect_mask[distances >= 0] = 255
-            if stub_r > 0:
-                cv2.circle(protect_mask, (x0, y0), stub_r, 255, -1)
-        return protect_mask
-
-    def _remove_long_lines(
-        self, roi_bin, roi_skeleton, protect_mask, min_length, thickness
-    ):
-        edges = cv2.Canny(roi_skeleton, 50, 150)
-        lines = cv2.HoughLinesP(
-            edges,
-            rho=1,
-            theta=np.pi / 180,
-            threshold=40,
-            minLineLength=min_length,
-            maxLineGap=10,
-        )
-        line_mask = np.zeros_like(roi_bin)
-        if lines is not None:
-            for x1, y1, x2, y2 in lines[:, 0]:
-                cv2.line(line_mask, (x1, y1), (x2, y2), 255, thickness)
-        erase_mask = cv2.bitwise_and(line_mask, cv2.bitwise_not(protect_mask))
-        roi_clean = roi_bin.copy()
-        roi_clean[erase_mask > 0] = 0
-        return roi_clean
-
-    def _tighten_bbox_by_protected_cc(self, roi_clean, protect_mask, original_bbox):
-        combined = cv2.bitwise_or(roi_clean, protect_mask)
-        if cv2.countNonZero(combined) == 0:
-            return original_bbox
-        count, labels = cv2.connectedComponents((combined > 0).astype(np.uint8))
+    def _refine_core_bbox_by_local_cc(self, binary, seed_bbox, core_margin, image_size):
+        img_w, img_h = image_size
+        x1, y1, x2, y2 = seed_bbox
+        wx1 = max(0, x1 - core_margin)
+        wy1 = max(0, y1 - core_margin)
+        wx2 = min(img_w - 1, x2 + core_margin)
+        wy2 = min(img_h - 1, y2 + core_margin)
+        roi = binary[wy1 : wy2 + 1, wx1 : wx2 + 1]
+        if cv2.countNonZero(roi) == 0:
+            return seed_bbox
+        count, labels = cv2.connectedComponents((roi > 0).astype(np.uint8))
         if count <= 1:
-            ys, xs = np.where(combined > 0)
-            if xs.size == 0 or ys.size == 0:
-                return original_bbox
-            min_x = int(xs.min()) + original_bbox[0]
-            max_x = int(xs.max()) + original_bbox[0]
-            min_y = int(ys.min()) + original_bbox[1]
-            max_y = int(ys.max()) + original_bbox[1]
-            return (min_x, min_y, max_x, max_y)
+            return seed_bbox
+        seed_mask = np.zeros_like(roi, dtype=np.uint8)
+        sx1 = x1 - wx1
+        sy1 = y1 - wy1
+        sx2 = x2 - wx1
+        sy2 = y2 - wy1
+        sx1 = max(0, min(sx1, roi.shape[1] - 1))
+        sx2 = max(0, min(sx2, roi.shape[1] - 1))
+        sy1 = max(0, min(sy1, roi.shape[0] - 1))
+        sy2 = max(0, min(sy2, roi.shape[0] - 1))
+        seed_mask[sy1 : sy2 + 1, sx1 : sx2 + 1] = 1
         best_label = None
         best_overlap = 0
         for label in range(1, count):
-            overlap = int(np.sum((labels == label) & (protect_mask > 0)))
+            overlap = int(np.sum((labels == label) & (seed_mask > 0)))
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_label = label
         if best_label is None or best_overlap == 0:
-            return original_bbox
+            return seed_bbox
         ys, xs = np.where(labels == best_label)
         if xs.size == 0 or ys.size == 0:
-            return original_bbox
-        min_x = int(xs.min()) + original_bbox[0]
-        max_x = int(xs.max()) + original_bbox[0]
-        min_y = int(ys.min()) + original_bbox[1]
-        max_y = int(ys.max()) + original_bbox[1]
+            return seed_bbox
+        min_x = int(xs.min()) + wx1
+        max_x = int(xs.max()) + wx1
+        min_y = int(ys.min()) + wy1
+        max_y = int(ys.max()) + wy1
         return (min_x, min_y, max_x, max_y)
 
-    def _pad_bbox(self, bbox, pad_factor, image_size, exit_points):
+    def _pick_two_farthest_points(self, pts):
+        if len(pts) < 2:
+            return []
+        max_dist = -1
+        pair = (pts[0], pts[1])
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                dx = pts[i][0] - pts[j][0]
+                dy = pts[i][1] - pts[j][1]
+                dist = dx * dx + dy * dy
+                if dist > max_dist:
+                    max_dist = dist
+                    pair = (pts[i], pts[j])
+        return [pair[0], pair[1]]
+
+    def _exit_sides_from_points(self, exit_pts, roi_w, roi_h):
+        sides = []
+        for x, y in exit_pts:
+            if x <= 1:
+                sides.append("left")
+            elif x >= roi_w - 2:
+                sides.append("right")
+            elif y <= 1:
+                sides.append("top")
+            elif y >= roi_h - 2:
+                sides.append("bottom")
+        return sides
+
+    def _extend_bbox_by_sides(
+        self, core_bbox, sides, stub_len_px, expanded_bbox, image_size
+    ):
+        img_w, img_h = image_size
+        core_x1, core_y1, core_x2, core_y2 = core_bbox
+        ex1, ey1, ex2, ey2 = expanded_bbox
+        fx1, fy1, fx2, fy2 = core_bbox
+        margin_x = int(0.15 * max(1, core_x2 - core_x1 + 1))
+        margin_y = int(0.15 * max(1, core_y2 - core_y1 + 1))
+
+        if "left" in sides:
+            fx1 = max(ex1, core_x1 - stub_len_px)
+        if "right" in sides:
+            fx2 = min(ex2, core_x2 + stub_len_px)
+        if "top" in sides:
+            fy1 = max(ey1, core_y1 - stub_len_px)
+        if "bottom" in sides:
+            fy2 = min(ey2, core_y2 + stub_len_px)
+
+        if ("left" in sides or "right" in sides) and not (
+            "top" in sides or "bottom" in sides
+        ):
+            fy1 = max(ey1, core_y1 - margin_y)
+            fy2 = min(ey2, core_y2 + margin_y)
+        if ("top" in sides or "bottom" in sides) and not (
+            "left" in sides or "right" in sides
+        ):
+            fx1 = max(ex1, core_x1 - margin_x)
+            fx2 = min(ex2, core_x2 + margin_x)
+
+        fx1 = max(0, min(fx1, img_w - 1))
+        fy1 = max(0, min(fy1, img_h - 1))
+        fx2 = max(0, min(fx2, img_w - 1))
+        fy2 = max(0, min(fy2, img_h - 1))
+        return (fx1, fy1, fx2, fy2)
+
+    def _pad_bbox_centered(self, bbox, pad_factor, image_size, required_points=None):
         x1, y1, x2, y2 = bbox
         img_w, img_h = image_size
         width = max(1, x2 - x1 + 1)
@@ -356,15 +376,16 @@ class CircuitSegmentationApp:
         fy1 = int(max(0, cy - new_h / 2.0))
         fx2 = int(min(img_w - 1, cx + new_w / 2.0))
         fy2 = int(min(img_h - 1, cy + new_h / 2.0))
-        for ex, ey in exit_points:
-            if ex < fx1:
-                fx1 = ex
-            if ex > fx2:
-                fx2 = ex
-            if ey < fy1:
-                fy1 = ey
-            if ey > fy2:
-                fy2 = ey
+        if required_points:
+            for ex, ey in required_points:
+                if ex < fx1:
+                    fx1 = ex
+                if ex > fx2:
+                    fx2 = ex
+                if ey < fy1:
+                    fy1 = ey
+                if ey > fy2:
+                    fy2 = ey
         fx1 = max(0, min(fx1, img_w - 1))
         fy1 = max(0, min(fy1, img_h - 1))
         fx2 = max(0, min(fx2, img_w - 1))
