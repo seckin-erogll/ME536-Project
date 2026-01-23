@@ -79,15 +79,32 @@ class CircuitSegmentationApp:
         gray = np.array(self.image.convert("L"))
 
         inverted = 255 - gray
-
         density_map = cv2.blur(inverted, (40, 40))
 
-        _, dense_mask = cv2.threshold(density_map, 50, 255, cv2.THRESH_BINARY)
+        grabcut_mask = np.full(gray.shape, cv2.GC_PR_BGD, dtype=np.uint8)
+        grabcut_mask[density_map < 10] = cv2.GC_BGD
+        grabcut_mask[density_map > 50] = cv2.GC_PR_FGD
 
-        kernel = np.ones((15, 15), np.uint8)
-        refined = cv2.dilate(dense_mask, kernel, iterations=1)
+        bgd_model = np.zeros((1, 65), np.float64)
+        fgd_model = np.zeros((1, 65), np.float64)
+        color_input = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        cv2.grabCut(
+            color_input,
+            grabcut_mask,
+            None,
+            bgd_model,
+            fgd_model,
+            5,
+            cv2.GC_INIT_WITH_MASK,
+        )
 
-        contours, _ = cv2.findContours(refined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        final_mask = np.where(
+            (grabcut_mask == cv2.GC_FGD) | (grabcut_mask == cv2.GC_PR_FGD),
+            255,
+            0,
+        ).astype(np.uint8)
+
+        contours, _ = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         boxed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         for contour in contours:
@@ -97,8 +114,14 @@ class CircuitSegmentationApp:
             x, y, w, h = cv2.boundingRect(contour)
             cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
-        contour_display = cv2.cvtColor(density_map, cv2.COLOR_GRAY2BGR)
-        cv2.imshow("Density Map", contour_display)
+        seed_vis = np.full(gray.shape, 127, dtype=np.uint8)
+        seed_vis[grabcut_mask == cv2.GC_BGD] = 0
+        seed_vis[grabcut_mask == cv2.GC_PR_FGD] = 255
+        seed_vis[grabcut_mask == cv2.GC_FGD] = 255
+
+        cv2.imshow("1. Density Input", density_map)
+        cv2.imshow("2. GrabCut Seeding", seed_vis)
+        cv2.imshow("3. Final Cut", final_mask)
         cv2.waitKey(1)
 
         self._update_canvas_from_array(boxed)
