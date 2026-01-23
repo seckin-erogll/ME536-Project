@@ -51,12 +51,14 @@ def cluster_anchor_points(img, original_img):
     transition_list.append(cluster_plot)
 
     cluster_centers = []
+    cluster_labels = []
     for label in unique_labels:
         if label == -1:
             continue
         cluster_points = anchor_points[labels == label]
         cluster_center = np.mean(cluster_points, axis=0)
         cluster_centers.append(cluster_center)
+        cluster_labels.append(label)
 
     fast = cv2.FastFeatureDetector_create(
         threshold=20, nonmaxSuppression=False, type=cv2.FAST_FEATURE_DETECTOR_TYPE_9_16
@@ -73,7 +75,7 @@ def cluster_anchor_points(img, original_img):
         for j in range(len(cluster_centers)):
             if np.linalg.norm(feature - cluster_centers[j]) < 60:
                 final_keypoints = np.vstack((final_keypoints, [feature]))
-                final_labels = np.append(final_labels, unique_labels[j + 1])
+                final_labels = np.append(final_labels, cluster_labels[j])
                 break
 
     final_cluster = original_img.copy()
