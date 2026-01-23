@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
+from preprocess_graph import driver_preprocess
+
 
 class CircuitSegmentationApp:
     def __init__(self, root):
@@ -76,32 +78,14 @@ class CircuitSegmentationApp:
         cv2.destroyAllWindows()
 
     def segment_components(self):
-        gray = np.array(self.image.convert("L"))
+        img_bgr = cv2.cvtColor(np.array(self.image), cv2.COLOR_RGB2BGR)
+        overlay_bgr, debug_images, _components, _rects = driver_preprocess(img_bgr)
 
-        inverted = 255 - gray
+        for idx, dbg in enumerate(debug_images):
+            cv2.imshow(f"Debug {idx}", dbg)
+            cv2.waitKey(1)
 
-        density_map = cv2.blur(inverted, (40, 40))
-
-        _, dense_mask = cv2.threshold(density_map, 50, 255, cv2.THRESH_BINARY)
-
-        kernel = np.ones((15, 15), np.uint8)
-        refined = cv2.dilate(dense_mask, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(refined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        boxed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 500:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
-            cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 2)
-
-        contour_display = cv2.cvtColor(density_map, cv2.COLOR_GRAY2BGR)
-        cv2.imshow("Density Map", contour_display)
-        cv2.waitKey(1)
-
-        self._update_canvas_from_array(boxed)
+        self._update_canvas_from_array(overlay_bgr)
 
     def _update_canvas_from_array(self, array_bgr):
         array_rgb = cv2.cvtColor(array_bgr, cv2.COLOR_BGR2RGB)
