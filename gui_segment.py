@@ -97,7 +97,30 @@ class CircuitSegmentationApp:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
             x, y, w, h = self._refine_bbox_by_projections(bin_img, x, y, w, h, pad=10)
-            x, y, w, h = self._expand_bbox(x, y, w, h, 1.10, gray.shape[1], gray.shape[0])
+            height, width = bin_img.shape[:2]
+            x0 = max(0, x)
+            y0 = max(0, y)
+            x1 = min(width, x + w)
+            y1 = min(height, y + h)
+            crop = bin_img[y0:y1, x0:x1]
+
+            if crop.size == 0:
+                continue
+
+            skel = self._skeletonize(crop)
+            endpoints, junctions = self._count_endpoints_and_junctions(skel)
+
+            if endpoints >= 4 and junctions >= 1:
+                core_box = self._tight_core_ignore_arms(crop)
+                if core_box is None:
+                    continue
+                cx0, cy0, cx1, cy1 = core_box
+                x = x0 + cx0
+                y = y0 + cy0
+                w = cx1 - cx0 + 1
+                h = cy1 - cy0 + 1
+
+            x, y, w, h = self._expand_bbox(x, y, w, h, 1.10, width, height)
             cv2.rectangle(boxed, (x, y), (x + w, y + h), (0, 0, 255), 2)
 
         contour_display = cv2.cvtColor(density_map, cv2.COLOR_GRAY2BGR)
@@ -168,6 +191,45 @@ class CircuitSegmentationApp:
         y1 = y0 + new_h - 1
         x0, y0, x1, y1 = self._clamp_bbox(x0, y0, x1, y1, width, height)
         return x0, y0, x1 - x0 + 1, y1 - y0 + 1
+
+    def _skeletonize(self, img_bin_255):
+        img = (img_bin_255 > 0).astype(np.uint8) * 255
+        if cv2.countNonZero(img) == 0:
+            return np.zeros_like(img, dtype=np.uint8)
+        element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        img = cv2.dilate(img, element, iterations=1)
+        skel = np.zeros_like(img)
+        while True:
+            eroded = cv2.erode(img, element)
+            opened = cv2.dilate(eroded, element)
+            temp = cv2.subtract(img, opened)
+            skel = cv2.bitwise_or(skel, temp)
+            img = eroded
+            if cv2.countNonZero(img) == 0:
+                break
+        return (skel > 0).astype(np.uint8)
+
+    def _count_endpoints_and_junctions(self, skel01):
+        k = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.uint8)
+        neigh = cv2.filter2D(skel01, -1, k, borderType=cv2.BORDER_CONSTANT)
+        endpoints = np.count_nonzero((skel01 == 1) & (neigh == 1))
+        junctions = np.count_nonzero((skel01 == 1) & (neigh >= 3))
+        return endpoints, junctions
+
+    def _tight_core_ignore_arms(self, crop_bin_255):
+        mask = (crop_bin_255 > 0).astype(np.uint8)
+        if cv2.countNonZero(mask) == 0:
+            return None
+        dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+        if dist.max() <= 0:
+            return None
+        core = (dist >= 0.6 * dist.max()).astype(np.uint8)
+        ys, xs = np.where(core > 0)
+        if xs.size == 0:
+            return None
+        x0, x1 = xs.min(), xs.max()
+        y0, y1 = ys.min(), ys.max()
+        return int(x0), int(y0), int(x1), int(y1)
 
     def _update_canvas_from_array(self, array_bgr):
         array_rgb = cv2.cvtColor(array_bgr, cv2.COLOR_BGR2RGB)
