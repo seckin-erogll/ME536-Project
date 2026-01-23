@@ -107,10 +107,19 @@ class CircuitSegmentationApp:
             if crop.size == 0:
                 continue
 
+            shrink = 2
+            if crop.shape[0] > 2 * shrink and crop.shape[1] > 2 * shrink:
+                crop_for_sides = crop[shrink:-shrink, shrink:-shrink]
+            else:
+                crop_for_sides = crop
+            active_sides, _ = self._count_active_sides(crop_for_sides, band=5, frac_thresh=0.02)
+
             skel = self._skeletonize(crop)
             endpoints, junctions = self._count_endpoints_and_junctions(skel)
 
-            if endpoints >= 4 and junctions >= 1:
+            is_border_junction = active_sides >= 3
+            is_skel_junction = endpoints >= 4 and junctions >= 1
+            if is_skel_junction and is_border_junction:
                 core_box = self._tight_core_ignore_arms(crop)
                 if core_box is None:
                     continue
@@ -128,6 +137,46 @@ class CircuitSegmentationApp:
         cv2.waitKey(1)
 
         self._update_canvas_from_array(boxed)
+
+    def _count_active_sides(self, crop_bin_255, band=5, frac_thresh=0.02):
+        """
+        crop_bin_255 is uint8 0/255, strokes are 255.
+        band is thickness (px) of border band.
+        For each side (L,R,T,B), look at a border strip and count on-pixels.
+        Mark side active if on_pixels >= frac_thresh * strip_area.
+        Return: (active_count, sides_dict)
+        sides_dict keys: "L","R","T","B"
+        """
+        if crop_bin_255.size == 0:
+            return 0, {"L": False, "R": False, "T": False, "B": False}
+
+        h, w = crop_bin_255.shape[:2]
+        if h == 0 or w == 0:
+            return 0, {"L": False, "R": False, "T": False, "B": False}
+
+        band = max(1, min(band, h, w))
+        mask = crop_bin_255 > 0
+
+        left = mask[:, :band]
+        right = mask[:, w - band :]
+        top = mask[:band, :]
+        bottom = mask[h - band :, :]
+
+        def is_active(strip):
+            area = strip.size
+            if area == 0:
+                return False
+            on_pixels = np.count_nonzero(strip)
+            return on_pixels >= frac_thresh * area
+
+        sides = {
+            "L": is_active(left),
+            "R": is_active(right),
+            "T": is_active(top),
+            "B": is_active(bottom),
+        }
+        active_count = sum(1 for value in sides.values() if value)
+        return active_count, sides
 
     def _clamp_bbox(self, x0, y0, x1, y1, width, height):
         x0 = max(0, min(x0, width - 1))
