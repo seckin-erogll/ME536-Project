@@ -14,7 +14,6 @@ from PIL import Image, ImageDraw, ImageTk
 from FH_Circuit.classify import classify_sketch_detailed, load_artifacts
 from FH_Circuit.config import IMAGE_SIZE
 from FH_Circuit.data import ensure_train_val_split
-from FH_Circuit.train import incremental_update_pipeline
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -527,7 +526,7 @@ class CircuitSegmentationApp:
         ttk.Label(
             dialog,
             text=(
-                "Needs review (novel/noise).\n"
+                "Needs review (noise check).\n"
                 f"Reasons: {reason_text}. Conf={confidence * 100:.1f}%"
             ),
             justify="center",
@@ -539,11 +538,8 @@ class CircuitSegmentationApp:
             selection["choice"] = choice
             dialog.destroy()
 
-        ttk.Button(dialog, text="Mark as Novel", command=lambda: choose("novel")).grid(
-            row=2, column=0, sticky="ew", padx=12, pady=4
-        )
         ttk.Button(dialog, text="Mark as Noise", command=lambda: choose("noise")).grid(
-            row=2, column=1, sticky="ew", padx=12, pady=4
+            row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=4
         )
 
         for idx, (label_name, prob) in enumerate(top_candidates):
@@ -555,8 +551,6 @@ class CircuitSegmentationApp:
         self.root.wait_window(dialog)
 
         choice = selection["choice"]
-        if choice == "novel":
-            return self._add_new_class(crop)
         if choice == "noise":
             discarded_path = self._save_discarded_sample(crop)
             self.status.set(f"Marked as noise: {discarded_path.name}")
@@ -566,35 +560,6 @@ class CircuitSegmentationApp:
             self.status.set(f"Saved hard example: {saved_path.name}")
             return choice, False
         return None, False
-
-    def _add_new_class(self, crop: np.ndarray) -> tuple[str | None, bool]:
-        class_name = self._prompt_new_class_name(crop)
-        if not class_name:
-            return "Unknown", False
-
-        self._save_dataset_sample(class_name, crop, hard_example=False)
-        total_before = self._count_label_samples(class_name)
-        if total_before < self.required_samples:
-            self._collect_samples_for_label(class_name, total_before)
-        total_after = self._count_label_samples(class_name)
-        if total_after < self.required_samples:
-            messagebox.showwarning(
-                "Not enough samples",
-                f"Need at least {self.required_samples} samples to update the model.",
-                parent=self.root,
-            )
-            return class_name, False
-
-        self.status.set("Updating model with new class...")
-        self.root.update_idletasks()
-        try:
-            incremental_update_pipeline(self.dataset_dir, self.model_dir)
-        except Exception as exc:  # pragma: no cover - defensive UI guard
-            messagebox.showerror("Update failed", str(exc), parent=self.root)
-            self.status.set("Incremental update failed.")
-            return class_name, False
-        self.status.set(f"Model updated with class '{class_name}'.")
-        return class_name, True
 
     def _format_classification_metrics(self, result: dict, label: str) -> str:
         confidence = result.get("topk", [("", 0.0)])[0][1] if result.get("topk") else None
@@ -670,46 +635,6 @@ class CircuitSegmentationApp:
         self.root.wait_window(dialog)
         return selection["mode"]
 
-    def _prompt_new_class_name(self, crop: np.ndarray) -> str | None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Unknown component")
-        dialog.transient(self.root)
-        dialog.grab_set()
-        dialog.resizable(False, False)
-
-        preview = self._make_preview_image(crop, size=192)
-        preview_label = ttk.Label(dialog, image=preview)
-        preview_label.image = preview
-        preview_label.grid(row=0, column=0, columnspan=2, padx=12, pady=(12, 6))
-
-        ttk.Label(dialog, text="Enter a new class name:").grid(
-            row=1, column=0, columnspan=2, padx=12, pady=(0, 6)
-        )
-
-        entry = ttk.Entry(dialog, width=28)
-        entry.grid(row=2, column=0, columnspan=2, padx=12, pady=(0, 10))
-        entry.focus_set()
-
-        result = {"name": None}
-
-        def submit() -> None:
-            name = entry.get().strip()
-            if not name:
-                messagebox.showwarning("Missing name", "Please enter a class name.", parent=dialog)
-                return
-            result["name"] = name
-            dialog.destroy()
-
-        ttk.Button(dialog, text="Continue", command=submit).grid(
-            row=3, column=0, sticky="ew", padx=(12, 6), pady=(0, 12)
-        )
-        ttk.Button(dialog, text="Cancel", command=dialog.destroy).grid(
-            row=3, column=1, sticky="ew", padx=(6, 12), pady=(0, 12)
-        )
-
-        self.root.wait_window(dialog)
-        return result["name"]
-
     def _import_samples(self, label: str) -> int:
         folder = filedialog.askdirectory(parent=self.root, title="Select folder of samples")
         if not folder:
@@ -752,7 +677,7 @@ class CircuitSegmentationApp:
             reasons = result.get("reasons", [])
             reason_text = ", ".join(reasons) if reasons else "unknown"
             confidence = float(result.get("max_proba") or 0.0)
-            return f"Needs review (novel/noise). Reasons: {reason_text}. Conf={confidence * 100:.1f}%"
+            return f"Needs review (noise check). Reasons: {reason_text}. Conf={confidence * 100:.1f}%"
         if status == "AMBIGUITY":
             if handled_label:
                 return f"Ambiguity resolved: {handled_label}"
