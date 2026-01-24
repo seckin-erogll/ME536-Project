@@ -11,7 +11,6 @@ from typing import List, Literal
 
 import numpy as np
 import torch
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM, SVC
 
@@ -33,7 +32,6 @@ from FH_Circuit.preprocess import preprocess
 @dataclasses.dataclass(frozen=True)
 class StageArtifacts:
     model: ConvAutoencoder
-    pca: PCA
     classifier: SVC
     labels: List[str]
     latent_scaler: StandardScaler
@@ -77,8 +75,6 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         model = ConvAutoencoder(latent_dim=checkpoint["latent_dim"])
     model.load_state_dict(checkpoint["state_dict"])
     labels = checkpoint["labels"]
-    with (model_dir / "pca.pkl").open("rb") as file:
-        pca = pickle.load(file)
     with (model_dir / "classifier.pkl").open("rb") as file:
         classifier = pickle.load(file)
     latent_scaler_path = model_dir / "latent_scaler.pkl"
@@ -119,7 +115,6 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
                 print("WARNING: ocsvm_meta.json missing; using default recon threshold.")
     return StageArtifacts(
         model=model,
-        pca=pca,
         classifier=classifier,
         labels=labels,
         latent_scaler=latent_scaler,
@@ -149,7 +144,6 @@ def load_artifacts(model_dir: Path) -> StageArtifacts:
 def _log_artifacts(model_dir: Path, artifacts: StageArtifacts) -> None:
     paths = {
         "autoencoder.pt": model_dir / "autoencoder.pt",
-        "pca.pkl": model_dir / "pca.pkl",
         "classifier.pkl": model_dir / "classifier.pkl",
         "latent_scaler.pkl": model_dir / "latent_scaler.pkl",
         "latent_density.pkl": model_dir / "latent_density.pkl",
@@ -355,8 +349,7 @@ def classify_sketch_detailed(
             nearest_threshold=nearest_threshold,
             message=message,
         )
-    reduced = artifacts.pca.transform(normalized_latent)
-    candidates, margin = _compute_candidates(artifacts, reduced, k=2)
+    candidates, margin = _compute_candidates(artifacts, normalized_latent, k=2)
     label = candidates[0][0] if candidates else None
     ambiguous = margin < ambiguity_threshold or not label
     if density is not None and label:

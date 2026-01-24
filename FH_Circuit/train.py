@@ -13,7 +13,6 @@ import numpy as np
 import torch
 import matplotlib
 from PIL import Image
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM, SVC
 from torch import nn
@@ -208,16 +207,13 @@ def train_autoencoder(
     return model, history
 
 
-def fit_pca_classifier(
+def fit_classifier(
     latents: np.ndarray,
     sample_labels: List[int],
-    components: int,
-) -> Tuple[PCA, SVC]:
-    pca = PCA(n_components=components)
-    reduced = pca.fit_transform(latents)
+) -> SVC:
     classifier = SVC(kernel="rbf", probability=True, C=1.0)
-    classifier.fit(reduced, sample_labels)
-    return pca, classifier
+    classifier.fit(latents, sample_labels)
+    return classifier
 
 
 def _collect_latents(
@@ -312,7 +308,6 @@ def save_reconstructions(
 def save_artifacts(
     output_dir: Path,
     model: nn.Module,
-    pca: PCA,
     classifier: SVC,
     latent_dim: int,
     labels: List[str],
@@ -334,8 +329,6 @@ def save_artifacts(
         },
         output_dir / "autoencoder.pt",
     )
-    with (output_dir / "pca.pkl").open("wb") as file:
-        pickle.dump(pca, file)
     with (output_dir / "classifier.pkl").open("wb") as file:
         pickle.dump(classifier, file)
     with (output_dir / "latent_scaler.pkl").open("wb") as file:
@@ -429,13 +422,10 @@ def train_stage(
         quantile=MAHALANOBIS_QUANTILE,
         threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
     )
-    combined = latents_norm
-    components = min(latent_dim, 16)
-    pca, classifier = fit_pca_classifier(combined, sample_labels, components)
+    classifier = fit_classifier(latents_norm, sample_labels)
     save_artifacts(
         output_dir,
         model,
-        pca,
         classifier,
         latent_dim,
         labels,
@@ -637,12 +627,10 @@ def incremental_update_pipeline(
         quantile=MAHALANOBIS_QUANTILE,
         threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
     )
-    components = min(latent_dim, 16)
-    pca, classifier = fit_pca_classifier(latents_norm, sample_labels, components)
+    classifier = fit_classifier(latents_norm, sample_labels)
     save_artifacts(
         model_dir,
         new_model,
-        pca,
         classifier,
         latent_dim,
         new_labels,
