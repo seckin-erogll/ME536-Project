@@ -6,7 +6,7 @@ import dataclasses
 import pickle
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Literal, Tuple
 
 import numpy as np
 import torch
@@ -31,6 +31,18 @@ class StageArtifacts:
     labels: List[str]
     latent_scaler: StandardScaler
     latent_density: LatentDensityArtifacts | None
+
+
+@dataclasses.dataclass(frozen=True)
+class ClassificationResult:
+    status: Literal["ok", "ambiguous", "novel", "noisy"]
+    label: str | None
+    candidates: list[tuple[str, float]]
+    recon_error: float
+    nearest_label: str | None
+    nearest_distance: float | None
+    nearest_threshold: float | None
+    message: str
 
 
 def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
@@ -90,31 +102,42 @@ def load_artifacts(model_dir: Path) -> StageArtifacts:
     return _load_stage_artifacts(model_dir)
 
 
-def _predict_label(
-    stage: StageArtifacts,
-    reduced: np.ndarray,
-    ambiguity_threshold: float,
-) -> Tuple[str, bool]:
+def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) -> tuple[list[tuple[str, float]], float]:
     probabilities = stage.classifier.predict_proba(reduced)[0]
-    top_indices = np.argsort(probabilities)[-2:]
-    predicted_index = int(top_indices[-1])
-    if predicted_index < 0 or predicted_index >= len(stage.labels):
-        raise ValueError("Model output out of range. Check training labels.")
-    top_score = probabilities[predicted_index]
-    second_score = probabilities[top_indices[-2]] if len(top_indices) > 1 else 0.0
-    if (top_score - second_score) < ambiguity_threshold:
-        return "", True
-    return stage.labels[predicted_index], False
+    sorted_indices = np.argsort(probabilities)[::-1]
+    top_indices = sorted_indices[:k]
+    candidates: list[tuple[str, float]] = []
+    for index in top_indices:
+        if index < 0 or index >= len(stage.labels):
+            raise ValueError("Model output out of range. Check training labels.")
+        candidates.append((stage.labels[int(index)], float(probabilities[int(index)])))
+    top_score = float(probabilities[int(sorted_indices[0])])
+    second_score = float(probabilities[int(sorted_indices[1])]) if len(sorted_indices) > 1 else 0.0
+    margin = top_score - second_score
+    return candidates, margin
 
 
-def classify_sketch(
+def classify_sketch_detailed(
     artifacts: StageArtifacts,
     sketch: np.ndarray,
     error_threshold: float = ERROR_THRESHOLD,
     ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
     noise_threshold: float = MSE_NOISE_THRESHOLD,
-) -> str:
-    processed = preprocess(sketch)
+) -> ClassificationResult:
+    try:
+        processed = preprocess(sketch)
+    except ValueError as exc:
+        message = f"Novelty detected: sketch too noisy. ({exc})"
+        return ClassificationResult(
+            status="noisy",
+            label=None,
+            candidates=[],
+            recon_error=float("inf"),
+            nearest_label=None,
+            nearest_distance=None,
+            nearest_threshold=None,
+            message=message,
+        )
     tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
     artifacts.model.eval()
     with torch.no_grad():
@@ -125,22 +148,106 @@ def classify_sketch(
             recon, latent, _ = outputs
     recon_error = torch.mean((recon - tensor) ** 2).item()
     if recon_error > noise_threshold:
-        return "Novelty detected: sketch too noisy."
+        message = "Novelty detected: sketch too noisy."
+        return ClassificationResult(
+            status="noisy",
+            label=None,
+            candidates=[],
+            recon_error=recon_error,
+            nearest_label=None,
+            nearest_distance=None,
+            nearest_threshold=None,
+            message=message,
+        )
     normalized_latent = artifacts.latent_scaler.transform(latent.cpu().numpy())
     density = artifacts.latent_density
+    nearest_label: str | None = None
+    nearest_distance: float | None = None
+    nearest_threshold: float | None = None
     if density is not None:
-        _, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
+        nearest_label, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
         if nearest_distance > nearest_threshold:
-            return "Novelty detected: unknown component."
+            message = "Novelty detected: unknown component."
+            return ClassificationResult(
+                status="novel",
+                label=None,
+                candidates=[],
+                recon_error=recon_error,
+                nearest_label=nearest_label,
+                nearest_distance=nearest_distance,
+                nearest_threshold=nearest_threshold,
+                message=message,
+            )
     elif recon_error > error_threshold:
-        return "Novelty detected: unknown component."
+        message = "Novelty detected: unknown component."
+        return ClassificationResult(
+            status="novel",
+            label=None,
+            candidates=[],
+            recon_error=recon_error,
+            nearest_label=None,
+            nearest_distance=None,
+            nearest_threshold=None,
+            message=message,
+        )
     reduced = artifacts.pca.transform(normalized_latent)
-    label, ambiguous = _predict_label(artifacts, reduced, ambiguity_threshold)
+    candidates, margin = _compute_candidates(artifacts, reduced, k=2)
+    label = candidates[0][0] if candidates else None
+    ambiguous = margin < ambiguity_threshold or not label
     if density is not None and label:
         predicted_distance = distance_to_label(normalized_latent[0], label, density)
         predicted_threshold = density.class_stats[label].threshold
         if predicted_distance > predicted_threshold:
-            return "Novelty detected: unknown component."
-    if ambiguous or not label:
-        return "Ambiguity detected: ask user to clarify between closest symbols."
-    return f"Detected: {label}"
+            message = "Novelty detected: unknown component."
+            return ClassificationResult(
+                status="novel",
+                label=None,
+                candidates=candidates,
+                recon_error=recon_error,
+                nearest_label=label,
+                nearest_distance=predicted_distance,
+                nearest_threshold=predicted_threshold,
+                message=message,
+            )
+    if ambiguous:
+        message = "Ambiguity detected: ask user to clarify between closest symbols."
+        return ClassificationResult(
+            status="ambiguous",
+            label=None,
+            candidates=candidates,
+            recon_error=recon_error,
+            nearest_label=nearest_label,
+            nearest_distance=nearest_distance,
+            nearest_threshold=nearest_threshold,
+            message=message,
+        )
+    message = f"Detected: {label}"
+    return ClassificationResult(
+        status="ok",
+        label=label,
+        candidates=candidates,
+        recon_error=recon_error,
+        nearest_label=nearest_label,
+        nearest_distance=nearest_distance,
+        nearest_threshold=nearest_threshold,
+        message=message,
+    )
+
+
+def classify_sketch(
+    artifacts: StageArtifacts,
+    sketch: np.ndarray,
+    error_threshold: float = ERROR_THRESHOLD,
+    ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
+    noise_threshold: float = MSE_NOISE_THRESHOLD,
+) -> str:
+    result = classify_sketch_detailed(
+        artifacts,
+        sketch,
+        error_threshold=error_threshold,
+        ambiguity_threshold=ambiguity_threshold,
+        noise_threshold=noise_threshold,
+    )
+    if result.status == "ok" and result.label:
+        return f"Detected: {result.label}"
+    return result.message
