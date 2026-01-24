@@ -86,6 +86,10 @@ def run_train(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         latent_dim=args.latent_dim,
         save_reconstructions_outputs=args.save_reconstructions,
+        use_ocsvm=args.use_ocsvm,
+        ocsvm_nu=args.ocsvm_nu,
+        ocsvm_gamma=args.ocsvm_gamma,
+        novelty_recon_quantile=args.novelty_recon_quantile,
     )
     print(f"Training complete. Artifacts saved to {args.output}.")
 
@@ -140,6 +144,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--save-reconstructions",
         action="store_true",
         help="Save reconstruction images after training.",
+    )
+    train.add_argument(
+        "--use-ocsvm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable One-Class SVM novelty detection.",
+    )
+    train.add_argument("--ocsvm-nu", type=float, default=0.05, help="One-Class SVM nu parameter.")
+    train.add_argument(
+        "--ocsvm-gamma",
+        type=str,
+        default="scale",
+        help="One-Class SVM gamma parameter.",
+    )
+    train.add_argument(
+        "--novelty-recon-quantile",
+        type=float,
+        default=0.99,
+        help="Quantile for reconstruction-error novelty threshold.",
     )
     train.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     train.set_defaults(func=run_train, prompt=True)

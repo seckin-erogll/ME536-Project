@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pickle
 import sys
 import time
@@ -14,7 +15,7 @@ import matplotlib
 from PIL import Image
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import SVC
+from sklearn.svm import OneClassSVM, SVC
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
@@ -219,25 +220,63 @@ def fit_pca_classifier(
     return pca, classifier
 
 
-def extract_latents(model, dataset) -> np.ndarray:
+def _collect_latents(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> tuple[np.ndarray, list[int], list[float]]:
     model.eval()
-    latents = []
-    sample_labels = []
-
-    device = next(model.parameters()).device
-
+    latents: list[np.ndarray] = []
+    sample_labels: list[int] = []
+    recon_errors: list[float] = []
     with torch.no_grad():
-        for image, label in dataset:
-            image = image.to(device)
-            outputs = model(image.unsqueeze(0))
+        for inputs, labels in loader:
+            inputs = inputs.to(device)
+            outputs = model(inputs)
             if len(outputs) == 2:
-                _, latent = outputs
+                recon, latent = outputs
             else:
-                _, latent, _ = outputs
-            latents.append(latent.detach().cpu())
-            sample_labels.append(int(label))
+                recon, latent, _ = outputs
+            batch_errors = torch.mean((recon - inputs) ** 2, dim=(1, 2, 3)).detach().cpu().numpy()
+            latents.append(latent.detach().cpu().numpy())
+            sample_labels.extend([int(label) for label in labels])
+            recon_errors.extend(batch_errors.tolist())
+    return np.concatenate(latents, axis=0), sample_labels, recon_errors
 
-    return torch.cat(latents, dim=0).numpy(), sample_labels
+
+def extract_latents(
+    model: nn.Module,
+    dataset: SymbolDataset,
+    *,
+    batch_size: int = 64,
+    shuffle: bool = False,
+) -> tuple[np.ndarray, list[int], list[float]]:
+    device = next(model.parameters()).device
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    return _collect_latents(model, loader, device)
+
+
+def extract_augmented_latents(
+    model: nn.Module,
+    samples: List[Sample],
+    labels: List[str],
+    *,
+    transform: T.Compose,
+    passes: int,
+    batch_size: int,
+) -> tuple[np.ndarray, list[int], list[float]]:
+    device = next(model.parameters()).device
+    all_latents: list[np.ndarray] = []
+    all_labels: list[int] = []
+    all_recon_errors: list[float] = []
+    for _ in range(max(1, passes)):
+        dataset = SymbolDataset(samples, labels, transform=transform)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        latents, sample_labels, recon_errors = _collect_latents(model, loader, device)
+        all_latents.append(latents)
+        all_labels.extend(sample_labels)
+        all_recon_errors.extend(recon_errors)
+    return np.concatenate(all_latents, axis=0), all_labels, all_recon_errors
 
 
 def save_reconstructions(
@@ -280,6 +319,9 @@ def save_artifacts(
     latent_scaler: StandardScaler,
     model_type: str,
     latent_density: LatentDensityArtifacts,
+    *,
+    ocsvm: OneClassSVM | None = None,
+    ocsvm_meta: dict | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -300,6 +342,12 @@ def save_artifacts(
         pickle.dump(latent_scaler, file)
     with (output_dir / "latent_density.pkl").open("wb") as file:
         pickle.dump(latent_density, file)
+    if ocsvm is not None:
+        with (output_dir / "ocsvm.pkl").open("wb") as file:
+            pickle.dump(ocsvm, file)
+    if ocsvm_meta is not None:
+        with (output_dir / "ocsvm_meta.json").open("w", encoding="utf-8") as file:
+            json.dump(ocsvm_meta, file, indent=2)
 
 
 def train_stage(
@@ -312,6 +360,11 @@ def train_stage(
     latent_dim: int,
     class_loss_weight: float,
     save_reconstructions_outputs: bool,
+    use_ocsvm: bool,
+    ocsvm_nu: float,
+    ocsvm_gamma: str,
+    novelty_recon_quantile: float,
+    ocsvm_aug_passes: int,
 ) -> None:
     train_dataset = SymbolDataset(train_samples, labels, transform=build_training_transforms())
     val_dataset = SymbolDataset(val_samples, labels)
@@ -327,9 +380,47 @@ def train_stage(
     loss_curve_path = plot_loss_curves(history, output_dir)
     print(f"Saved loss curves to: {loss_curve_path}")
     eval_dataset = SymbolDataset(train_samples, labels)
-    latents, sample_labels = extract_latents(model, eval_dataset)
+    base_latents, sample_labels, base_recon_errors = extract_latents(
+        model,
+        eval_dataset,
+        batch_size=batch_size,
+    )
+    latents_for_scaler = base_latents
+    recon_errors_for_threshold = base_recon_errors
+    ocsvm = None
+    ocsvm_meta = None
+    if use_ocsvm:
+        augmented_latents, _aug_labels, aug_recon_errors = extract_augmented_latents(
+            model,
+            train_samples,
+            labels,
+            transform=build_training_transforms(),
+            passes=ocsvm_aug_passes,
+            batch_size=batch_size,
+        )
+        latents_for_scaler = augmented_latents
+        recon_errors_for_threshold = aug_recon_errors
     latent_scaler = StandardScaler()
-    latents_norm = latent_scaler.fit_transform(latents)
+    latent_scaler.fit(latents_for_scaler)
+    latents_norm = latent_scaler.transform(base_latents)
+    if use_ocsvm:
+        augmented_norm = latent_scaler.transform(latents_for_scaler)
+        gamma_value: str | float = ocsvm_gamma
+        if isinstance(gamma_value, str) and gamma_value not in {"scale", "auto"}:
+            gamma_value = float(gamma_value)
+        ocsvm = OneClassSVM(kernel="rbf", nu=ocsvm_nu, gamma=gamma_value)
+        ocsvm.fit(augmented_norm)
+        recon_threshold = float(np.quantile(recon_errors_for_threshold, novelty_recon_quantile))
+        ocsvm_meta = {
+            "nu": ocsvm_nu,
+            "gamma": ocsvm_gamma,
+            "kernel": "rbf",
+            "latent_dim": latent_dim,
+            "train_samples": int(len(latents_for_scaler)),
+            "augmentation_passes": int(max(1, ocsvm_aug_passes)),
+            "recon_error_quantile": float(novelty_recon_quantile),
+            "recon_error_threshold": recon_threshold,
+        }
     latent_density = compute_latent_density(
         latents_norm,
         sample_labels,
@@ -351,6 +442,8 @@ def train_stage(
         latent_scaler,
         model_type="supervised",
         latent_density=latent_density,
+        ocsvm=ocsvm,
+        ocsvm_meta=ocsvm_meta,
     )
     if save_reconstructions_outputs:
         print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")
@@ -367,6 +460,11 @@ def train_pipeline(
     latent_dim: int = 32,
     class_loss_weight: float = 0.3,
     save_reconstructions_outputs: bool = False,
+    use_ocsvm: bool = True,
+    ocsvm_nu: float = 0.05,
+    ocsvm_gamma: str = "scale",
+    novelty_recon_quantile: float = 0.99,
+    ocsvm_aug_passes: int = 3,
 ) -> None:
     print(f"Training single-stage classifier with labels: {', '.join(labels)}")
     train_stage(
@@ -379,6 +477,11 @@ def train_pipeline(
         latent_dim=latent_dim,
         class_loss_weight=class_loss_weight,
         save_reconstructions_outputs=save_reconstructions_outputs,
+        use_ocsvm=use_ocsvm,
+        ocsvm_nu=ocsvm_nu,
+        ocsvm_gamma=ocsvm_gamma,
+        novelty_recon_quantile=novelty_recon_quantile,
+        ocsvm_aug_passes=ocsvm_aug_passes,
     )
 
 
@@ -418,6 +521,11 @@ def incremental_update_pipeline(
     batch_size: int = 32,
     lr: float = 1e-3,
     unfreeze_last_encoder_layer: bool = False,
+    use_ocsvm: bool = True,
+    ocsvm_nu: float = 0.05,
+    ocsvm_gamma: str = "scale",
+    novelty_recon_quantile: float = 0.99,
+    ocsvm_aug_passes: int = 3,
 ) -> None:
     device = resolve_device()
     print(f"Incremental update on device: {describe_device(device)} | epochs={epochs}")
@@ -480,9 +588,47 @@ def incremental_update_pipeline(
         print(f"Epoch {epoch}/{epochs} | Loss {avg_loss:.6f}")
 
     eval_dataset = SymbolDataset(train_samples, new_labels)
-    latents, sample_labels = extract_latents(new_model, eval_dataset)
+    base_latents, sample_labels, base_recon_errors = extract_latents(
+        new_model,
+        eval_dataset,
+        batch_size=batch_size,
+    )
+    latents_for_scaler = base_latents
+    recon_errors_for_threshold = base_recon_errors
+    ocsvm = None
+    ocsvm_meta = None
+    if use_ocsvm:
+        augmented_latents, _aug_labels, aug_recon_errors = extract_augmented_latents(
+            new_model,
+            train_samples,
+            new_labels,
+            transform=build_training_transforms(),
+            passes=ocsvm_aug_passes,
+            batch_size=batch_size,
+        )
+        latents_for_scaler = augmented_latents
+        recon_errors_for_threshold = aug_recon_errors
     latent_scaler = StandardScaler()
-    latents_norm = latent_scaler.fit_transform(latents)
+    latent_scaler.fit(latents_for_scaler)
+    latents_norm = latent_scaler.transform(base_latents)
+    if use_ocsvm:
+        augmented_norm = latent_scaler.transform(latents_for_scaler)
+        gamma_value: str | float = ocsvm_gamma
+        if isinstance(gamma_value, str) and gamma_value not in {"scale", "auto"}:
+            gamma_value = float(gamma_value)
+        ocsvm = OneClassSVM(kernel="rbf", nu=ocsvm_nu, gamma=gamma_value)
+        ocsvm.fit(augmented_norm)
+        recon_threshold = float(np.quantile(recon_errors_for_threshold, novelty_recon_quantile))
+        ocsvm_meta = {
+            "nu": ocsvm_nu,
+            "gamma": ocsvm_gamma,
+            "kernel": "rbf",
+            "latent_dim": latent_dim,
+            "train_samples": int(len(latents_for_scaler)),
+            "augmentation_passes": int(max(1, ocsvm_aug_passes)),
+            "recon_error_quantile": float(novelty_recon_quantile),
+            "recon_error_threshold": recon_threshold,
+        }
     latent_density = compute_latent_density(
         latents_norm,
         sample_labels,
@@ -503,5 +649,7 @@ def incremental_update_pipeline(
         latent_scaler,
         model_type=checkpoint.get("model_type", "supervised"),
         latent_density=latent_density,
+        ocsvm=ocsvm,
+        ocsvm_meta=ocsvm_meta,
     )
     print("updated artifacts saved")

@@ -443,7 +443,7 @@ class CircuitSegmentationApp:
                 status_message = "Ambiguity resolved: marked as noise."
             else:
                 status_message = f"Ambiguity resolved: {handled_label}"
-        if result.status == "noisy" and handled_label == "Noise":
+        if result.novelty_label == "BAD_CROP" and handled_label == "Noise":
             status_message = "Marked as noise."
         if updated:
             self.artifacts = load_artifacts(self.model_dir)
@@ -451,13 +451,15 @@ class CircuitSegmentationApp:
             handled_label = handled_label or (result.label if result.label else "Unknown")
             status_message = result.message
         label = handled_label or (result.label if result.label else self._label_from_status(result.status))
-        is_novelty = result.status in {"novel", "noisy"} or label in {"Unknown", "Noise"}
+        metrics = self._format_classification_metrics(result, label)
+        status_message = f"{metrics} | {status_message}"
+        is_novelty = result.novelty_label in {"UNKNOWN", "BAD_CROP"} or label in {"Unknown", "Noise"}
         return label, is_novelty, status_message
 
     def _handle_result(self, crop: np.ndarray, result: ClassificationResult) -> tuple[str | None, bool]:
         if result.status == "ambiguous":
             return self._handle_ambiguity(crop, result), False
-        if result.status in {"novel", "noisy"}:
+        if result.novelty_label in {"UNKNOWN", "BAD_CROP"}:
             return self._handle_novelty_or_noise(crop, result)
         return None, False
 
@@ -508,7 +510,7 @@ class CircuitSegmentationApp:
         return "Noise"
 
     def _handle_novelty_or_noise(self, crop: np.ndarray, result: ClassificationResult) -> tuple[str | None, bool]:
-        if result.status == "noisy":
+        if result.novelty_label == "BAD_CROP":
             self._show_noise_dialog(crop, result.message)
             return "Noise", False
 
@@ -539,6 +541,17 @@ class CircuitSegmentationApp:
             return class_name, False
         self.status.set(f"Model updated with class '{class_name}'.")
         return class_name, True
+
+    def _format_classification_metrics(self, result: ClassificationResult, label: str) -> str:
+        confidence = result.candidates[0][1] if result.candidates else None
+        confidence_text = f"{confidence * 100:.1f}%" if confidence is not None else "n/a"
+        ocsvm_score = result.ocsvm_score
+        ocsvm_text = f"{ocsvm_score:.4f}" if ocsvm_score is not None else "n/a"
+        recon_text = f"{result.recon_error:.4f}"
+        return (
+            f"{label} ({confidence_text}) | {result.novelty_label}"
+            f" | recon={recon_text} | ocsvm={ocsvm_text}"
+        )
 
     def _collect_samples_for_label(self, label: str, initial_total: int) -> None:
         while True:
