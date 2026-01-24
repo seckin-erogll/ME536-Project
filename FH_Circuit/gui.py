@@ -10,14 +10,21 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.classify import MIN_CONFIDENCE, classify_sketch, load_artifacts
 
 
 class SketchGUI:
-    def __init__(self, model_dir: Path, dataset_dir: Path, canvas_size: int = 256) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        dataset_dir: Path,
+        canvas_size: int = 256,
+        min_confidence: float = MIN_CONFIDENCE,
+    ) -> None:
         self.artifacts = load_artifacts(model_dir)
         self.dataset_dir = dataset_dir
         self.canvas_size = canvas_size
+        self.min_confidence = min_confidence
         self.root = tk.Tk()
         self.root.title("FH Circuit Sketch")
         self.canvas = tk.Canvas(self.root, width=canvas_size, height=canvas_size, bg="black")
@@ -76,7 +83,7 @@ class SketchGUI:
         resized = self.image.resize((64, 64), resample=Image.BILINEAR)
         sketch = np.array(resized)
         try:
-            result = classify_sketch(self.artifacts, sketch)
+            result = classify_sketch(self.artifacts, sketch, min_confidence=self.min_confidence)
         except ValueError as exc:
             result = str(exc)
         self.status.set(result)
@@ -129,6 +136,6 @@ class SketchGUI:
         self.example_caption.config(text=f"Label: {label}")
 
 
-def launch_gui(model_dir: Path, dataset_dir: Path) -> None:
-    app = SketchGUI(model_dir, dataset_dir)
+def launch_gui(model_dir: Path, dataset_dir: Path, min_confidence: float = MIN_CONFIDENCE) -> None:
+    app = SketchGUI(model_dir, dataset_dir, min_confidence=min_confidence)
     app.run()
