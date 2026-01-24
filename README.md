@@ -14,6 +14,7 @@ Training uses the dataset stored in `FH_Circuit/Training_Data`. Each component c
 - `FH_Circuit/model.py`: convolutional autoencoder.
 - `FH_Circuit/train.py`: training loop + PCA/SVM artifacts.
 - `FH_Circuit/dataset.py`: PyTorch dataset wrapper used by training.
+- `FH_Circuit/latent_density.py`: latent-space Mahalanobis density estimation.
 
 **Inference/GUI files**
 - `FH_Circuit/classify.py`: inference logic (loads artifacts + predicts labels).
@@ -58,6 +59,10 @@ The folder name becomes the label used during training and inference.
 ```bash
 python main.py train --dataset-dir FH_Circuit/Training_Data --epochs 5 --output ./artifacts
 ```
+
+Training now stores per-class latent centroids and covariance statistics in `latent_density.pkl`.
+Inference uses Mahalanobis distance in latent space to gate novelty detection before trusting SVM
+probabilities.
 
 ### 4) Run the GUI
 
