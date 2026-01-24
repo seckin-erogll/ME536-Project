@@ -21,6 +21,7 @@ from FH_Circuit.config import (
     AMBIGUITY_THRESHOLD,
     ENABLE_TTA_ROTATIONS,
     ERROR_THRESHOLD,
+    MIN_CONFIDENCE,
     MSE_NOISE_THRESHOLD,
     MSE_NOISE_THRESHOLD_LOOSE,
 )
@@ -36,6 +37,7 @@ class StageArtifacts:
     labels: List[str]
     latent_scaler: StandardScaler
     latent_density: LatentDensityArtifacts | None
+    latent_protos: dict | None
     ocsvm: OneClassSVM | None
     ocsvm_meta: dict | None
     recon_error_threshold: float | None
@@ -94,6 +96,11 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
     if latent_density_path.exists():
         with latent_density_path.open("rb") as file:
             latent_density = pickle.load(file)
+    latent_protos_path = model_dir / "latent_protos.pkl"
+    latent_protos = None
+    if latent_protos_path.exists():
+        with latent_protos_path.open("rb") as file:
+            latent_protos = pickle.load(file)
     ocsvm_path = model_dir / "ocsvm.pkl"
     ocsvm_meta_path = model_dir / "ocsvm_meta.json"
     ocsvm = None
@@ -119,6 +126,7 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         labels=labels,
         latent_scaler=latent_scaler,
         latent_density=latent_density,
+        latent_protos=latent_protos,
         ocsvm=ocsvm,
         ocsvm_meta=ocsvm_meta,
         recon_error_threshold=recon_error_threshold,
@@ -147,6 +155,7 @@ def _log_artifacts(model_dir: Path, artifacts: StageArtifacts) -> None:
         "classifier.pkl": model_dir / "classifier.pkl",
         "latent_scaler.pkl": model_dir / "latent_scaler.pkl",
         "latent_density.pkl": model_dir / "latent_density.pkl",
+        "latent_protos.pkl": model_dir / "latent_protos.pkl",
         "ocsvm.pkl": model_dir / "ocsvm.pkl",
         "ocsvm_meta.json": model_dir / "ocsvm_meta.json",
     }
@@ -157,7 +166,13 @@ def _log_artifacts(model_dir: Path, artifacts: StageArtifacts) -> None:
     print(f"Artifacts ({model_dir}): {status} | ocsvm={ocsvm_state}")
 
 
-def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) -> tuple[list[tuple[str, float]], float]:
+def _compute_candidates(
+    stage: StageArtifacts, reduced: np.ndarray, k: int = 2
+) -> tuple[list[tuple[str, float]], float, float]:
+    if not hasattr(stage.classifier, "predict_proba"):
+        raise ValueError(
+            "Classifier missing predict_proba; ensure SVC was trained with probability=True."
+        )
     probabilities = stage.classifier.predict_proba(reduced)[0]
     sorted_indices = np.argsort(probabilities)[::-1]
     top_indices = sorted_indices[:k]
@@ -169,7 +184,7 @@ def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) 
     top_score = float(probabilities[int(sorted_indices[0])])
     second_score = float(probabilities[int(sorted_indices[1])]) if len(sorted_indices) > 1 else 0.0
     margin = top_score - second_score
-    return candidates, margin
+    return candidates, margin, top_score
 
 
 def _rotated_variants(processed: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -228,6 +243,30 @@ def _best_rotation_by_density(artifacts: StageArtifacts, processed: np.ndarray) 
     return best
 
 
+def _nearest_proto(
+    normalized_latent: np.ndarray, latent_protos: dict
+) -> tuple[str, float, float]:
+    labels = latent_protos.get("labels", [])
+    mu_map = latent_protos.get("mu", {})
+    sigma_map = latent_protos.get("sigma", {})
+    thr_map = latent_protos.get("thr", {})
+    if not labels:
+        raise ValueError("latent_protos is missing label metadata.")
+    nearest_label = ""
+    nearest_distance = float("inf")
+    nearest_threshold = float("inf")
+    for label in labels:
+        mu = np.asarray(mu_map[label])
+        sigma = np.asarray(sigma_map[label])
+        diff = (normalized_latent - mu) / sigma
+        dist = float(np.linalg.norm(diff))
+        if dist < nearest_distance:
+            nearest_label = label
+            nearest_distance = dist
+            nearest_threshold = float(thr_map[label])
+    return nearest_label, nearest_distance, nearest_threshold
+
+
 def classify_sketch_detailed(
     artifacts: StageArtifacts,
     sketch: np.ndarray,
@@ -256,6 +295,7 @@ def classify_sketch_detailed(
         )
     artifacts.model.eval()
     density = artifacts.latent_density
+    latent_protos = artifacts.latent_protos
     nearest_label: str | None = None
     nearest_distance: float | None = None
     nearest_threshold: float | None = None
@@ -308,31 +348,7 @@ def classify_sketch_detailed(
             nearest_threshold=nearest_threshold,
             message=message,
         )
-    if ocsvm_pred is not None and ocsvm_pred < 0:
-        if recon_error > recon_threshold:
-            novelty_label = "UNKNOWN"
-            message = "Novelty detected: unknown component."
-            status = "novel"
-        else:
-            novelty_label = "BAD_CROP"
-            message = "Novelty detected: bad crop."
-            status = "noisy"
-        return ClassificationResult(
-            status=status,
-            novelty_label=novelty_label,
-            label=None,
-            candidates=[],
-            recon_error=recon_error,
-            recon_threshold=recon_threshold,
-            ocsvm_score=ocsvm_score,
-            ocsvm_pred=ocsvm_pred,
-            best_angle_deg=best_angle_deg,
-            nearest_label=nearest_label,
-            nearest_distance=nearest_distance,
-            nearest_threshold=nearest_threshold,
-            message=message,
-        )
-    if ocsvm_pred is None and recon_error > error_threshold:
+    if recon_error > error_threshold:
         message = "Novelty detected: unknown component."
         return ClassificationResult(
             status="novel",
@@ -349,10 +365,65 @@ def classify_sketch_detailed(
             nearest_threshold=nearest_threshold,
             message=message,
         )
-    candidates, margin = _compute_candidates(artifacts, normalized_latent, k=2)
+    candidates, margin, max_proba = _compute_candidates(artifacts, normalized_latent, k=2)
+    if max_proba < MIN_CONFIDENCE:
+        if recon_error > error_threshold:
+            novelty_label = "UNKNOWN"
+            message = "Novelty detected: unknown component."
+            status = "novel"
+        else:
+            novelty_label = "BAD_CROP"
+            message = "Novelty detected: bad crop."
+            status = "noisy"
+        return ClassificationResult(
+            status=status,
+            novelty_label=novelty_label,
+            label=None,
+            candidates=candidates,
+            recon_error=recon_error,
+            recon_threshold=recon_threshold,
+            ocsvm_score=ocsvm_score,
+            ocsvm_pred=ocsvm_pred,
+            best_angle_deg=best_angle_deg,
+            nearest_label=nearest_label,
+            nearest_distance=nearest_distance,
+            nearest_threshold=nearest_threshold,
+            message=message,
+        )
+    if latent_protos is not None:
+        proto_label, proto_distance, proto_threshold = _nearest_proto(
+            normalized_latent[0], latent_protos
+        )
+        nearest_label = proto_label
+        nearest_distance = proto_distance
+        nearest_threshold = proto_threshold
+        if proto_distance > proto_threshold:
+            if recon_error > error_threshold:
+                novelty_label = "UNKNOWN"
+                message = "Novelty detected: unknown component."
+                status = "novel"
+            else:
+                novelty_label = "BAD_CROP"
+                message = "Novelty detected: bad crop."
+                status = "noisy"
+            return ClassificationResult(
+                status=status,
+                novelty_label=novelty_label,
+                label=None,
+                candidates=candidates,
+                recon_error=recon_error,
+                recon_threshold=recon_threshold,
+                ocsvm_score=ocsvm_score,
+                ocsvm_pred=ocsvm_pred,
+                best_angle_deg=best_angle_deg,
+                nearest_label=nearest_label,
+                nearest_distance=nearest_distance,
+                nearest_threshold=nearest_threshold,
+                message=message,
+            )
     label = candidates[0][0] if candidates else None
     ambiguous = margin < ambiguity_threshold or not label
-    if density is not None and label:
+    if density is not None and label and latent_protos is None:
         predicted_distance = distance_to_label(normalized_latent[0], label, density)
         predicted_threshold = density.class_stats[label].threshold
         nearest_label = label

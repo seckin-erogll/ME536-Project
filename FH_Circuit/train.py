@@ -33,6 +33,8 @@ from FH_Circuit.config import (
     MAHALANOBIS_QUANTILE,
     MAHALANOBIS_REG_EPS,
     MAHALANOBIS_THRESHOLD_SCALE,
+    PROTO_Q,
+    PROTO_SCALE,
 )
 
 
@@ -275,6 +277,41 @@ def extract_augmented_latents(
     return np.concatenate(all_latents, axis=0), all_labels, all_recon_errors
 
 
+def compute_latent_protos(
+    latents: np.ndarray,
+    sample_labels: List[int],
+    labels: List[str],
+    *,
+    quantile: float,
+    scale: float,
+) -> dict:
+    label_array = np.asarray(sample_labels, dtype=np.int64)
+    if latents.shape[0] != label_array.shape[0]:
+        raise ValueError("Latents and labels must have the same number of samples.")
+    proto_mu: dict[str, np.ndarray] = {}
+    proto_sigma: dict[str, np.ndarray] = {}
+    proto_thr: dict[str, float] = {}
+    for index, label in enumerate(labels):
+        class_latents = latents[label_array == index]
+        if class_latents.size == 0:
+            raise ValueError(f"No latent samples available for class '{label}'.")
+        mu = class_latents.mean(axis=0)
+        sigma = class_latents.std(axis=0) + 1e-6
+        distances = np.linalg.norm((class_latents - mu) / sigma, axis=1)
+        base_threshold = float(np.quantile(distances, quantile))
+        proto_mu[label] = mu
+        proto_sigma[label] = sigma
+        proto_thr[label] = base_threshold * scale
+    return {
+        "labels": list(labels),
+        "mu": proto_mu,
+        "sigma": proto_sigma,
+        "thr": proto_thr,
+        "quantile": float(quantile),
+        "scale": float(scale),
+    }
+
+
 def save_reconstructions(
     model: ConvAutoencoder,
     samples: List[Sample],
@@ -315,6 +352,7 @@ def save_artifacts(
     model_type: str,
     latent_density: LatentDensityArtifacts,
     *,
+    latent_protos: dict | None = None,
     ocsvm: OneClassSVM | None = None,
     ocsvm_meta: dict | None = None,
 ) -> None:
@@ -335,6 +373,9 @@ def save_artifacts(
         pickle.dump(latent_scaler, file)
     with (output_dir / "latent_density.pkl").open("wb") as file:
         pickle.dump(latent_density, file)
+    if latent_protos is not None:
+        with (output_dir / "latent_protos.pkl").open("wb") as file:
+            pickle.dump(latent_protos, file)
     if ocsvm is not None:
         with (output_dir / "ocsvm.pkl").open("wb") as file:
             pickle.dump(ocsvm, file)
@@ -422,6 +463,13 @@ def train_stage(
         quantile=MAHALANOBIS_QUANTILE,
         threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
     )
+    latent_protos = compute_latent_protos(
+        latents_norm,
+        sample_labels,
+        labels,
+        quantile=PROTO_Q,
+        scale=PROTO_SCALE,
+    )
     classifier = fit_classifier(latents_norm, sample_labels)
     save_artifacts(
         output_dir,
@@ -432,6 +480,7 @@ def train_stage(
         latent_scaler,
         model_type="supervised",
         latent_density=latent_density,
+        latent_protos=latent_protos,
         ocsvm=ocsvm,
         ocsvm_meta=ocsvm_meta,
     )
@@ -627,6 +676,13 @@ def incremental_update_pipeline(
         quantile=MAHALANOBIS_QUANTILE,
         threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
     )
+    latent_protos = compute_latent_protos(
+        latents_norm,
+        sample_labels,
+        new_labels,
+        quantile=PROTO_Q,
+        scale=PROTO_SCALE,
+    )
     classifier = fit_classifier(latents_norm, sample_labels)
     save_artifacts(
         model_dir,
@@ -637,6 +693,7 @@ def incremental_update_pipeline(
         latent_scaler,
         model_type=checkpoint.get("model_type", "supervised"),
         latent_density=latent_density,
+        latent_protos=latent_protos,
         ocsvm=ocsvm,
         ocsvm_meta=ocsvm_meta,
     )
