@@ -18,6 +18,7 @@ from sklearn.svm import SVC
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
+from torchvision.transforms import InterpolationMode
 
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -28,6 +29,7 @@ from FH_Circuit.latent_density import LatentDensityArtifacts, compute_latent_den
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
 from FH_Circuit.config import (
+    ENABLE_FLIPS,
     MAHALANOBIS_QUANTILE,
     MAHALANOBIS_REG_EPS,
     MAHALANOBIS_THRESHOLD_SCALE,
@@ -57,13 +59,39 @@ class AddGaussianNoise:
         return torch.clamp(tensor + noise, 0.0, 1.0)
 
 
+class RandomRotate90:
+    """Rotate by k*90 degrees without interpolation blur."""
+
+    def __init__(self, p: float = 0.75):
+        self.p = p
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        if torch.rand(()) > self.p:
+            return tensor
+        k = int(torch.randint(0, 4, (1,)).item())
+        if k == 0:
+            return tensor
+        return torch.rot90(tensor, k=k, dims=(-2, -1))
+
+
 def build_training_transforms() -> T.Compose:
-    return T.Compose(
+    transforms: list = [RandomRotate90(p=0.75)]
+    if ENABLE_FLIPS:
+        transforms.extend([T.RandomHorizontalFlip(p=0.5), T.RandomVerticalFlip(p=0.5)])
+    transforms.extend(
         [
-            T.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1), fill=0),
+            # NEAREST avoids blurring thin strokes after discrete rotations.
+            T.RandomAffine(
+                degrees=15,
+                translate=(0.1, 0.1),
+                scale=(0.9, 1.1),
+                fill=0,
+                interpolation=InterpolationMode.NEAREST,
+            ),
             AddGaussianNoise(std=0.06),
         ]
     )
+    return T.Compose(transforms)
 
 
 def plot_loss_curves(history: Dict[str, List[float]], output_dir: Path) -> Path:

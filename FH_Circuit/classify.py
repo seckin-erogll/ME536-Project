@@ -6,7 +6,7 @@ import dataclasses
 import pickle
 import sys
 from pathlib import Path
-from typing import List, Literal, Tuple
+from typing import List, Literal
 
 import numpy as np
 import torch
@@ -17,7 +17,13 @@ from sklearn.svm import SVC
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD, MSE_NOISE_THRESHOLD
+from FH_Circuit.config import (
+    AMBIGUITY_THRESHOLD,
+    ENABLE_TTA_ROTATIONS,
+    ERROR_THRESHOLD,
+    MSE_NOISE_THRESHOLD,
+    MSE_NOISE_THRESHOLD_LOOSE,
+)
 from FH_Circuit.latent_density import LatentDensityArtifacts, distance_to_label, nearest_class
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
@@ -39,6 +45,7 @@ class ClassificationResult:
     label: str | None
     candidates: list[tuple[str, float]]
     recon_error: float
+    best_angle_deg: int | None
     nearest_label: str | None
     nearest_distance: float | None
     nearest_threshold: float | None
@@ -117,6 +124,51 @@ def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) 
     return candidates, margin
 
 
+def _rotated_variants(processed: np.ndarray) -> list[tuple[int, np.ndarray]]:
+    angles = (0, 90, 180, 270)
+    variants: list[tuple[int, np.ndarray]] = []
+    for k, angle in enumerate(angles):
+        rotated = np.rot90(processed, k).copy() if k else processed.copy()
+        variants.append((angle, rotated))
+    return variants
+
+
+def _forward_latent(artifacts: StageArtifacts, processed: np.ndarray) -> tuple[float, np.ndarray]:
+    tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
+    with torch.no_grad():
+        outputs = artifacts.model(tensor)
+        if len(outputs) == 2:
+            recon, latent = outputs
+        else:
+            recon, latent, _ = outputs
+    recon_error = torch.mean((recon - tensor) ** 2).item()
+    normalized_latent = artifacts.latent_scaler.transform(latent.cpu().numpy())
+    return recon_error, normalized_latent
+
+
+def _best_rotation_by_density(artifacts: StageArtifacts, processed: np.ndarray) -> dict | None:
+    density = artifacts.latent_density
+    if density is None:
+        return None
+    best: dict | None = None
+    for angle, rotated in _rotated_variants(processed):
+        recon_error, normalized_latent = _forward_latent(artifacts, rotated)
+        if recon_error > MSE_NOISE_THRESHOLD_LOOSE:
+            continue
+        nearest_label, dist, threshold = nearest_class(normalized_latent[0], density)
+        # Pick the rotation with the tightest Mahalanobis fit to known classes.
+        if best is None or dist < best["dist"]:
+            best = {
+                "angle": angle,
+                "recon_error": recon_error,
+                "normalized_latent": normalized_latent,
+                "nearest_label": nearest_label,
+                "dist": dist,
+                "threshold": threshold,
+            }
+    return best
+
+
 def classify_sketch_detailed(
     artifacts: StageArtifacts,
     sketch: np.ndarray,
@@ -133,39 +185,39 @@ def classify_sketch_detailed(
             label=None,
             candidates=[],
             recon_error=float("inf"),
+            best_angle_deg=None,
             nearest_label=None,
             nearest_distance=None,
             nearest_threshold=None,
             message=message,
         )
-    tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
     artifacts.model.eval()
-    with torch.no_grad():
-        outputs = artifacts.model(tensor)
-        if len(outputs) == 2:
-            recon, latent = outputs
-        else:
-            recon, latent, _ = outputs
-    recon_error = torch.mean((recon - tensor) ** 2).item()
-    if recon_error > noise_threshold:
-        message = "Novelty detected: sketch too noisy."
-        return ClassificationResult(
-            status="noisy",
-            label=None,
-            candidates=[],
-            recon_error=recon_error,
-            nearest_label=None,
-            nearest_distance=None,
-            nearest_threshold=None,
-            message=message,
-        )
-    normalized_latent = artifacts.latent_scaler.transform(latent.cpu().numpy())
     density = artifacts.latent_density
     nearest_label: str | None = None
     nearest_distance: float | None = None
     nearest_threshold: float | None = None
-    if density is not None:
-        nearest_label, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
+    best_angle_deg: int | None = 0
+    if density is not None and ENABLE_TTA_ROTATIONS:
+        best_rotation = _best_rotation_by_density(artifacts, processed)
+        if best_rotation is None:
+            message = "Novelty detected: sketch too noisy."
+            return ClassificationResult(
+                status="noisy",
+                label=None,
+                candidates=[],
+                recon_error=float("inf"),
+                best_angle_deg=None,
+                nearest_label=None,
+                nearest_distance=None,
+                nearest_threshold=None,
+                message=message,
+            )
+        recon_error = float(best_rotation["recon_error"])
+        normalized_latent = best_rotation["normalized_latent"]
+        best_angle_deg = int(best_rotation["angle"])
+        nearest_label = best_rotation["nearest_label"]
+        nearest_distance = float(best_rotation["dist"])
+        nearest_threshold = float(best_rotation["threshold"])
         if nearest_distance > nearest_threshold:
             message = "Novelty detected: unknown component."
             return ClassificationResult(
@@ -173,23 +225,55 @@ def classify_sketch_detailed(
                 label=None,
                 candidates=[],
                 recon_error=recon_error,
+                best_angle_deg=best_angle_deg,
                 nearest_label=nearest_label,
                 nearest_distance=nearest_distance,
                 nearest_threshold=nearest_threshold,
                 message=message,
             )
-    elif recon_error > error_threshold:
-        message = "Novelty detected: unknown component."
-        return ClassificationResult(
-            status="novel",
-            label=None,
-            candidates=[],
-            recon_error=recon_error,
-            nearest_label=None,
-            nearest_distance=None,
-            nearest_threshold=None,
-            message=message,
-        )
+    else:
+        recon_error, normalized_latent = _forward_latent(artifacts, processed)
+        if recon_error > noise_threshold:
+            message = "Novelty detected: sketch too noisy."
+            return ClassificationResult(
+                status="noisy",
+                label=None,
+                candidates=[],
+                recon_error=recon_error,
+                best_angle_deg=best_angle_deg,
+                nearest_label=None,
+                nearest_distance=None,
+                nearest_threshold=None,
+                message=message,
+            )
+        if density is not None:
+            nearest_label, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
+            if nearest_distance > nearest_threshold:
+                message = "Novelty detected: unknown component."
+                return ClassificationResult(
+                    status="novel",
+                    label=None,
+                    candidates=[],
+                    recon_error=recon_error,
+                    best_angle_deg=best_angle_deg,
+                    nearest_label=nearest_label,
+                    nearest_distance=nearest_distance,
+                    nearest_threshold=nearest_threshold,
+                    message=message,
+                )
+        elif recon_error > error_threshold:
+            message = "Novelty detected: unknown component."
+            return ClassificationResult(
+                status="novel",
+                label=None,
+                candidates=[],
+                recon_error=recon_error,
+                best_angle_deg=best_angle_deg,
+                nearest_label=None,
+                nearest_distance=None,
+                nearest_threshold=None,
+                message=message,
+            )
     reduced = artifacts.pca.transform(normalized_latent)
     candidates, margin = _compute_candidates(artifacts, reduced, k=2)
     label = candidates[0][0] if candidates else None
@@ -204,6 +288,7 @@ def classify_sketch_detailed(
                 label=None,
                 candidates=candidates,
                 recon_error=recon_error,
+                best_angle_deg=best_angle_deg,
                 nearest_label=label,
                 nearest_distance=predicted_distance,
                 nearest_threshold=predicted_threshold,
@@ -216,6 +301,7 @@ def classify_sketch_detailed(
             label=None,
             candidates=candidates,
             recon_error=recon_error,
+            best_angle_deg=best_angle_deg,
             nearest_label=nearest_label,
             nearest_distance=nearest_distance,
             nearest_threshold=nearest_threshold,
@@ -227,6 +313,7 @@ def classify_sketch_detailed(
         label=label,
         candidates=candidates,
         recon_error=recon_error,
+        best_angle_deg=best_angle_deg,
         nearest_label=nearest_label,
         nearest_distance=nearest_distance,
         nearest_threshold=nearest_threshold,
