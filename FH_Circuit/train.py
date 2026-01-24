@@ -22,7 +22,7 @@ from torchvision import transforms as T
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from FH_Circuit.data import Sample
+from FH_Circuit.data import Sample, ensure_train_val_split, load_split_datasets
 from FH_Circuit.dataset import SymbolDataset
 from FH_Circuit.latent_density import LatentDensityArtifacts, compute_latent_density
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
@@ -352,3 +352,128 @@ def train_pipeline(
         class_loss_weight=class_loss_weight,
         save_reconstructions_outputs=save_reconstructions_outputs,
     )
+
+
+def _load_supervised_checkpoint(model_dir: Path) -> tuple[SupervisedAutoencoder, dict, int, list[str]]:
+    checkpoint_path = model_dir / "autoencoder.pt"
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model_type = checkpoint.get("model_type", "supervised")
+    if model_type != "supervised":
+        raise ValueError("Incremental updates require a supervised autoencoder checkpoint.")
+    latent_dim = int(checkpoint["latent_dim"])
+    labels = list(checkpoint.get("labels", []))
+    num_classes = int(checkpoint.get("num_classes", len(labels)))
+    model = SupervisedAutoencoder(latent_dim=latent_dim, num_classes=num_classes)
+    model.load_state_dict(checkpoint["state_dict"])
+    return model, checkpoint, latent_dim, labels
+
+
+def _unfreeze_last_encoder_linear(model: SupervisedAutoencoder) -> None:
+    last_linear: nn.Linear | None = None
+    for module in reversed(list(model.encoder)):
+        if isinstance(module, nn.Linear):
+            last_linear = module
+            break
+    if last_linear is None:
+        return
+    for param in last_linear.parameters():
+        param.requires_grad = True
+
+
+def incremental_update_pipeline(
+    dataset_dir: Path,
+    model_dir: Path,
+    epochs: int = 20,
+    batch_size: int = 32,
+    lr: float = 1e-3,
+    unfreeze_last_encoder_layer: bool = False,
+) -> None:
+    device = resolve_device()
+    print(f"Incremental update on device: {describe_device(device)} | epochs={epochs}")
+    old_model, checkpoint, latent_dim, old_labels = _load_supervised_checkpoint(model_dir)
+    old_model = old_model.to(device)
+
+    ensure_train_val_split(dataset_dir)
+    train_samples, _val_samples, new_labels = load_split_datasets(dataset_dir)
+
+    new_model = SupervisedAutoencoder(latent_dim=latent_dim, num_classes=len(new_labels)).to(device)
+    new_model.encoder.load_state_dict(old_model.encoder.state_dict())
+    new_model.decoder.load_state_dict(old_model.decoder.state_dict())
+
+    old_label_to_index = {label: idx for idx, label in enumerate(old_labels)}
+    new_label_to_index = {label: idx for idx, label in enumerate(new_labels)}
+    with torch.no_grad():
+        new_model.classifier_head.weight.normal_(mean=0.0, std=0.02)
+        new_model.classifier_head.bias.zero_()
+        for label, old_idx in old_label_to_index.items():
+            if label not in new_label_to_index:
+                continue
+            new_idx = new_label_to_index[label]
+            new_model.classifier_head.weight[new_idx].copy_(
+                old_model.classifier_head.weight[old_idx].to(device)
+            )
+            new_model.classifier_head.bias[new_idx].copy_(old_model.classifier_head.bias[old_idx].to(device))
+
+    for param in new_model.encoder.parameters():
+        param.requires_grad = False
+    for param in new_model.decoder.parameters():
+        param.requires_grad = False
+    for param in new_model.classifier_head.parameters():
+        param.requires_grad = True
+    if unfreeze_last_encoder_layer:
+        _unfreeze_last_encoder_linear(new_model)
+
+    train_dataset = SymbolDataset(train_samples, new_labels, transform=build_training_transforms())
+    loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(
+        [param for param in new_model.parameters() if param.requires_grad],
+        lr=lr,
+    )
+    criterion = nn.CrossEntropyLoss()
+
+    for epoch in range(1, epochs + 1):
+        new_model.train()
+        new_model.encoder.eval()
+        new_model.decoder.eval()
+        running_loss = 0.0
+        for inputs, labels_idx in loader:
+            inputs = inputs.to(device)
+            labels_idx = labels_idx.to(device)
+            _recon, _latent, logits = new_model(inputs)
+            loss = criterion(logits, labels_idx)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        avg_loss = running_loss / max(1, len(loader))
+        print(f"Epoch {epoch}/{epochs} | Loss {avg_loss:.6f}")
+
+    eval_dataset = SymbolDataset(train_samples, new_labels)
+    latents, sample_labels = extract_latents(new_model, eval_dataset)
+    latent_scaler = StandardScaler()
+    latents_norm = latent_scaler.fit_transform(latents)
+    latent_density = compute_latent_density(
+        latents_norm,
+        sample_labels,
+        new_labels,
+        reg_eps=MAHALANOBIS_REG_EPS,
+        quantile=MAHALANOBIS_QUANTILE,
+        threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
+    )
+    components = min(latent_dim, 16)
+    pca, classifier = fit_pca_classifier(latents_norm, sample_labels, components)
+    save_artifacts(
+        model_dir,
+        new_model,
+        pca,
+        classifier,
+        latent_dim,
+        new_labels,
+        latent_scaler,
+        model_type=checkpoint.get("model_type", "supervised"),
+        latent_density=latent_density,
+    )
+    print("updated artifacts saved")

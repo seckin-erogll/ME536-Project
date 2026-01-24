@@ -117,7 +117,8 @@ def run_circuit_gui(args: argparse.Namespace) -> None:
     if args.prompt:
         print("Enter circuit GUI parameters (press Enter to accept defaults).")
         args.model_dir = _prompt_path("Model directory", args.model_dir)
-    launch_circuit_gui(args.model_dir)
+        args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
+    launch_circuit_gui(args.model_dir, args.dataset_dir)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,6 +164,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("./artifacts"),
         help="Model artifacts folder.",
+    )
+    circuit_gui.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=Path("FH_Circuit/Training_Data"),
+        help="Path to the training dataset directory.",
     )
     circuit_gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     circuit_gui.set_defaults(func=run_circuit_gui, prompt=True)
