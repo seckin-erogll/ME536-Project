@@ -11,7 +11,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-from FH_Circuit.classify import ClassificationResult, classify_sketch_detailed, load_artifacts
+from FH_Circuit.classify import (
+    MIN_CONFIDENCE,
+    ClassificationResult,
+    classify_sketch_detailed,
+    load_artifacts,
+)
 from FH_Circuit.config import IMAGE_SIZE
 from FH_Circuit.data import ensure_train_val_split
 from FH_Circuit.train import incremental_update_pipeline
@@ -152,7 +157,14 @@ class SymbolCollector(tk.Toplevel):
 
 
 class CircuitSegmentationApp:
-    def __init__(self, root: tk.Tk, model_dir: Path, dataset_dir: Path, required_samples: int = 5) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        model_dir: Path,
+        dataset_dir: Path,
+        required_samples: int = 5,
+        min_confidence: float = MIN_CONFIDENCE,
+    ) -> None:
         self.root = root
         self.root.title("Circuit Segmentation + Classification")
 
@@ -160,6 +172,7 @@ class CircuitSegmentationApp:
         self.dataset_dir = dataset_dir
         self.dataset_dir.mkdir(parents=True, exist_ok=True)
         self.required_samples = max(1, required_samples)
+        self.min_confidence = min_confidence
         self.discarded_dir = self.model_dir / "_discarded"
         self.discarded_dir.mkdir(parents=True, exist_ok=True)
 
@@ -176,9 +189,9 @@ class CircuitSegmentationApp:
 
         # Segmentation parameters (tunable via sliders below).
         self.segmentation_defaults = {
-            "blur_kernel": 40,
+            "blur_kernel": 20,
             "threshold": 50,
-            "dilation_kernel": 15,
+            "dilation_kernel": 7,
             "min_area": 500,
         }
         self.segmentation_params = dict(self.segmentation_defaults)
@@ -354,7 +367,7 @@ class CircuitSegmentationApp:
                 w = cx1 - cx0 + 1
                 h = cy1 - cy0 + 1
 
-            x, y, w, h = self._expand_bbox(x, y, w, h, 1.10, width, height)
+            x, y, w, h = self._expand_bbox(x, y, w, h, 1.02, width, height)
 
             label, is_novelty, status = self._classify_crop(gray, x, y, w, h)
             statuses.append(status)
@@ -435,7 +448,7 @@ class CircuitSegmentationApp:
         crop = self._prepare_crop(gray, x, y, w, h)
         if crop is None:
             return "Unknown", False, "Empty crop"
-        result = classify_sketch_detailed(self.artifacts, crop)
+        result = classify_sketch_detailed(self.artifacts, crop, min_confidence=self.min_confidence)
         handled_label, updated = self._handle_result(crop, result)
         status_message = result.message
         if result.status == "ambiguous" and handled_label:
@@ -447,14 +460,15 @@ class CircuitSegmentationApp:
             status_message = "Marked as noise."
         if updated:
             self.artifacts = load_artifacts(self.model_dir)
-            result = classify_sketch_detailed(self.artifacts, crop)
+            result = classify_sketch_detailed(self.artifacts, crop, min_confidence=self.min_confidence)
             handled_label = handled_label or (result.label if result.label else "Unknown")
             status_message = result.message
         label = handled_label or (result.label if result.label else self._label_from_status(result.status))
         metrics = self._format_classification_metrics(result, label)
         status_message = f"{metrics} | {status_message}"
         is_novelty = result.novelty_label in {"UNKNOWN", "BAD_CROP"} or label in {"Unknown", "Noise"}
-        return label, is_novelty, status_message
+        display_label = result.novelty_label if result.novelty_label in {"UNKNOWN", "BAD_CROP"} else label
+        return display_label, is_novelty, status_message
 
     def _handle_result(self, crop: np.ndarray, result: ClassificationResult) -> tuple[str | None, bool]:
         if result.status == "ambiguous":
@@ -543,7 +557,7 @@ class CircuitSegmentationApp:
         return class_name, True
 
     def _format_classification_metrics(self, result: ClassificationResult, label: str) -> str:
-        confidence = result.candidates[0][1] if result.candidates else None
+        confidence = result.max_proba
         confidence_text = f"{confidence * 100:.1f}%" if confidence is not None else "n/a"
         ocsvm_score = result.ocsvm_score
         ocsvm_text = f"{ocsvm_score:.4f}" if ocsvm_score is not None else "n/a"
@@ -889,9 +903,18 @@ class CircuitSegmentationApp:
         self._set_display_from_np(array_bgr)
 
 
-def launch_circuit_gui(model_dir: Path, dataset_dir: Path) -> None:
+def launch_circuit_gui(
+    model_dir: Path,
+    dataset_dir: Path,
+    min_confidence: float = MIN_CONFIDENCE,
+) -> None:
     root = tk.Tk()
-    app = CircuitSegmentationApp(root, model_dir=model_dir, dataset_dir=dataset_dir)
+    app = CircuitSegmentationApp(
+        root,
+        model_dir=model_dir,
+        dataset_dir=dataset_dir,
+        min_confidence=min_confidence,
+    )
     root.mainloop()
 
 

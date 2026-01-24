@@ -28,6 +28,8 @@ from FH_Circuit.latent_density import LatentDensityArtifacts, distance_to_label,
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
 
+MIN_CONFIDENCE = 0.65
+
 
 @dataclasses.dataclass(frozen=True)
 class StageArtifacts:
@@ -47,6 +49,7 @@ class ClassificationResult:
     novelty_label: Literal["KNOWN", "UNKNOWN", "BAD_CROP"]
     label: str | None
     candidates: list[tuple[str, float]]
+    max_proba: float | None
     recon_error: float
     recon_threshold: float | None
     ocsvm_score: float | None
@@ -159,13 +162,22 @@ def _log_artifacts(model_dir: Path, artifacts: StageArtifacts) -> None:
 
 def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) -> tuple[list[tuple[str, float]], float]:
     probabilities = stage.classifier.predict_proba(reduced)[0]
+    return _compute_candidates_from_probs(stage.labels, probabilities, k=k)
+
+
+def _compute_candidates_from_probs(
+    labels: list[str],
+    probabilities: np.ndarray,
+    *,
+    k: int = 2,
+) -> tuple[list[tuple[str, float]], float]:
     sorted_indices = np.argsort(probabilities)[::-1]
     top_indices = sorted_indices[:k]
     candidates: list[tuple[str, float]] = []
     for index in top_indices:
-        if index < 0 or index >= len(stage.labels):
+        if index < 0 or index >= len(labels):
             raise ValueError("Model output out of range. Check training labels.")
-        candidates.append((stage.labels[int(index)], float(probabilities[int(index)])))
+        candidates.append((labels[int(index)], float(probabilities[int(index)])))
     top_score = float(probabilities[int(sorted_indices[0])])
     second_score = float(probabilities[int(sorted_indices[1])]) if len(sorted_indices) > 1 else 0.0
     margin = top_score - second_score
@@ -234,6 +246,7 @@ def classify_sketch_detailed(
     error_threshold: float = ERROR_THRESHOLD,
     ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
     noise_threshold: float = MSE_NOISE_THRESHOLD,
+    min_confidence: float = MIN_CONFIDENCE,
 ) -> ClassificationResult:
     try:
         processed = preprocess(sketch)
@@ -244,6 +257,7 @@ def classify_sketch_detailed(
             novelty_label="BAD_CROP",
             label=None,
             candidates=[],
+            max_proba=None,
             recon_error=float("inf"),
             recon_threshold=artifacts.recon_error_threshold or error_threshold,
             ocsvm_score=None,
@@ -269,6 +283,7 @@ def classify_sketch_detailed(
                 novelty_label="BAD_CROP",
                 label=None,
                 candidates=[],
+                max_proba=None,
                 recon_error=float("inf"),
                 recon_threshold=artifacts.recon_error_threshold or error_threshold,
                 ocsvm_score=None,
@@ -298,6 +313,7 @@ def classify_sketch_detailed(
             novelty_label="BAD_CROP",
             label=None,
             candidates=[],
+            max_proba=None,
             recon_error=recon_error,
             recon_threshold=recon_threshold,
             ocsvm_score=ocsvm_score,
@@ -322,6 +338,7 @@ def classify_sketch_detailed(
             novelty_label=novelty_label,
             label=None,
             candidates=[],
+            max_proba=None,
             recon_error=recon_error,
             recon_threshold=recon_threshold,
             ocsvm_score=ocsvm_score,
@@ -339,6 +356,7 @@ def classify_sketch_detailed(
             novelty_label="UNKNOWN",
             label=None,
             candidates=[],
+            max_proba=None,
             recon_error=recon_error,
             recon_threshold=recon_threshold,
             ocsvm_score=ocsvm_score,
@@ -349,8 +367,40 @@ def classify_sketch_detailed(
             nearest_threshold=nearest_threshold,
             message=message,
         )
-    candidates, margin = _compute_candidates(artifacts, normalized_latent, k=2)
+    probabilities = artifacts.classifier.predict_proba(normalized_latent)[0]
+    max_proba = float(np.max(probabilities))
+    if max_proba < min_confidence:
+        if recon_error > recon_threshold:
+            novelty_label = "UNKNOWN"
+            message = (
+                f"Low confidence ({max_proba * 100:.1f}%). Novelty detected: unknown component."
+            )
+            status = "novel"
+            label = "Unknown"
+        else:
+            novelty_label = "BAD_CROP"
+            message = f"Low confidence ({max_proba * 100:.1f}%). Novelty detected: bad crop."
+            status = "noisy"
+            label = "Noise"
+        return ClassificationResult(
+            status=status,
+            novelty_label=novelty_label,
+            label=label,
+            candidates=[],
+            max_proba=max_proba,
+            recon_error=recon_error,
+            recon_threshold=recon_threshold,
+            ocsvm_score=ocsvm_score,
+            ocsvm_pred=ocsvm_pred,
+            best_angle_deg=best_angle_deg,
+            nearest_label=nearest_label,
+            nearest_distance=nearest_distance,
+            nearest_threshold=nearest_threshold,
+            message=message,
+        )
+    candidates, margin = _compute_candidates_from_probs(artifacts.labels, probabilities, k=2)
     label = candidates[0][0] if candidates else None
+    max_proba = candidates[0][1] if candidates else max_proba
     ambiguous = margin < ambiguity_threshold or not label
     if density is not None and label:
         predicted_distance = distance_to_label(normalized_latent[0], label, density)
@@ -365,6 +415,7 @@ def classify_sketch_detailed(
             novelty_label="KNOWN",
             label=None,
             candidates=candidates,
+            max_proba=max_proba,
             recon_error=recon_error,
             recon_threshold=recon_threshold,
             ocsvm_score=ocsvm_score,
@@ -381,6 +432,7 @@ def classify_sketch_detailed(
         novelty_label="KNOWN",
         label=label,
         candidates=candidates,
+        max_proba=max_proba,
         recon_error=recon_error,
         recon_threshold=recon_threshold,
         ocsvm_score=ocsvm_score,
@@ -399,6 +451,7 @@ def classify_sketch(
     error_threshold: float = ERROR_THRESHOLD,
     ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
     noise_threshold: float = MSE_NOISE_THRESHOLD,
+    min_confidence: float = MIN_CONFIDENCE,
 ) -> str:
     result = classify_sketch_detailed(
         artifacts,
@@ -406,6 +459,7 @@ def classify_sketch(
         error_threshold=error_threshold,
         ambiguity_threshold=ambiguity_threshold,
         noise_threshold=noise_threshold,
+        min_confidence=min_confidence,
     )
     if result.status == "ok" and result.label:
         return f"Detected: {result.label}"

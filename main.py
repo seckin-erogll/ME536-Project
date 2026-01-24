@@ -99,7 +99,7 @@ def run_gui(args: argparse.Namespace) -> None:
         print("Enter GUI parameters (press Enter to accept defaults).")
         args.model_dir = _prompt_path("Model directory", args.model_dir)
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
-    launch_gui(args.model_dir, args.dataset_dir)
+    launch_gui(args.model_dir, args.dataset_dir, min_confidence=args.min_confidence)
 
 
 def run_classify(args: argparse.Namespace) -> None:
@@ -113,7 +113,7 @@ def run_classify(args: argparse.Namespace) -> None:
     image = Image.open(args.image).convert("L")
     image = image.resize((64, 64), resample=Image.BILINEAR)
     sketch = np.array(image)
-    result = classify_sketch(artifacts, sketch)
+    result = classify_sketch(artifacts, sketch, min_confidence=args.min_confidence)
     print(result)
 
 
@@ -122,7 +122,7 @@ def run_circuit_gui(args: argparse.Namespace) -> None:
         print("Enter circuit GUI parameters (press Enter to accept defaults).")
         args.model_dir = _prompt_path("Model directory", args.model_dir)
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
-    launch_circuit_gui(args.model_dir, args.dataset_dir)
+    launch_circuit_gui(args.model_dir, args.dataset_dir, min_confidence=args.min_confidence)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -175,6 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("FH_Circuit/Training_Data"),
         help="Path to the training dataset directory.",
     )
+    gui.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.65,
+        help="Minimum SVC confidence before marking as novelty.",
+    )
     gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     gui.set_defaults(func=run_gui, prompt=True)
 
@@ -194,12 +200,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("FH_Circuit/Training_Data"),
         help="Path to the training dataset directory.",
     )
+    circuit_gui.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.65,
+        help="Minimum SVC confidence before marking as novelty.",
+    )
     circuit_gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     circuit_gui.set_defaults(func=run_circuit_gui, prompt=True)
 
     classify = subparsers.add_parser("classify", help="Classify a sketch image.")
     classify.add_argument("image", type=Path, nargs="?", help="Path to the image file.")
     classify.add_argument("--model-dir", type=Path, default=Path("./artifacts"), help="Model artifacts folder.")
+    classify.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.65,
+        help="Minimum SVC confidence before marking as novelty.",
+    )
     classify.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     classify.set_defaults(func=run_classify, prompt=True)
 
