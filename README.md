@@ -63,6 +63,13 @@ python main.py train --dataset-dir FH_Circuit/Training_Data --epochs 5 --output 
 Training now stores per-class latent centroids and covariance statistics in `latent_density.pkl`.
 Inference uses Mahalanobis distance in latent space to gate novelty detection before trusting SVM
 probabilities.
+You can tune novelty sensitivity with the Mahalanobis quantile and scale (recommended quantile
+0.995–0.999, scale 1.0–1.5) via the training CLI flags:
+
+```bash
+python main.py train --dataset-dir FH_Circuit/Training_Data --epochs 5 --output ./artifacts \
+  --mahalanobis-quantile 0.995 --mahalanobis-threshold-scale 1.2
+```
 
 ### 4) Run the GUI
 

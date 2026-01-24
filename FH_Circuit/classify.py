@@ -21,6 +21,7 @@ from FH_Circuit.config import (
     AMBIGUITY_THRESHOLD,
     ENABLE_TTA_ROTATIONS,
     ERROR_THRESHOLD,
+    MAHALANOBIS_RECOMMENDED,
     MSE_NOISE_THRESHOLD,
     MSE_NOISE_THRESHOLD_LOOSE,
 )
@@ -52,6 +53,35 @@ class ClassificationResult:
     message: str
 
 
+_SCORE_SAMPLE_LIMIT = 5
+_score_sample_count = 0
+_mse_range: list[float] = []
+_maha_range: list[float] = []
+
+
+def _log_score_sample(recon_error: float, maha_distance: float | None) -> None:
+    global _score_sample_count
+    if _score_sample_count >= _SCORE_SAMPLE_LIMIT:
+        return
+    _score_sample_count += 1
+    _mse_range.append(recon_error)
+    if maha_distance is not None:
+        _maha_range.append(maha_distance)
+    mse_min = min(_mse_range)
+    mse_max = max(_mse_range)
+    if _maha_range:
+        maha_min = min(_maha_range)
+        maha_max = max(_maha_range)
+        maha_part = f"maha=[{maha_min:.4f}, {maha_max:.4f}]"
+    else:
+        maha_part = "maha=disabled"
+    print(
+        "Inference score sample"
+        f" {_score_sample_count}/{_SCORE_SAMPLE_LIMIT}:"
+        f" mse={recon_error:.4f} (range [{mse_min:.4f}, {mse_max:.4f}]), {maha_part}"
+    )
+
+
 def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
     checkpoint_path = model_dir / "autoencoder.pt"
     try:
@@ -74,21 +104,56 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
     with (model_dir / "classifier.pkl").open("rb") as file:
         classifier = pickle.load(file)
     latent_scaler_path = model_dir / "latent_scaler.pkl"
+    latent_density_path = model_dir / "latent_density.pkl"
+    has_scaler = latent_scaler_path.exists()
+    has_density = latent_density_path.exists()
     if latent_scaler_path.exists():
         with latent_scaler_path.open("rb") as file:
             latent_scaler = pickle.load(file)
     else:
+        print(
+            f"Warning: latent_scaler.pkl not found in {model_dir}. "
+            "Using identity scaler; classification may be degraded.",
+            file=sys.stderr,
+        )
         latent_scaler = StandardScaler()
         latent_scaler.mean_ = np.zeros(checkpoint["latent_dim"], dtype=np.float64)
         latent_scaler.scale_ = np.ones(checkpoint["latent_dim"], dtype=np.float64)
         latent_scaler.var_ = np.ones(checkpoint["latent_dim"], dtype=np.float64)
         latent_scaler.n_features_in_ = checkpoint["latent_dim"]
         latent_scaler.n_samples_seen_ = 1
-    latent_density_path = model_dir / "latent_density.pkl"
     latent_density = None
     if latent_density_path.exists():
         with latent_density_path.open("rb") as file:
             latent_density = pickle.load(file)
+        if not has_scaler:
+            print(
+                f"Warning: latent_density.pkl found in {model_dir} but latent_scaler.pkl is missing. "
+                "Disabling Mahalanobis novelty detection.",
+                file=sys.stderr,
+            )
+            latent_density = None
+    density_status = "loaded" if latent_density is not None else ("disabled" if has_density else "missing")
+    scaler_status = "loaded" if has_scaler else "missing"
+    density_summary = ""
+    if latent_density is not None:
+        density_summary = (
+            f" quantile={latent_density.quantile:.4f}"
+            f" scale={latent_density.threshold_scale:.2f}"
+            f" global_threshold={latent_density.global_threshold:.4f}"
+        )
+    else:
+        density_summary = f" recommended={MAHALANOBIS_RECOMMENDED}"
+    print(
+        "Artifacts loaded"
+        f" from={model_dir}"
+        f" autoencoder={'yes' if checkpoint_path.exists() else 'no'}"
+        f" pca={'yes' if (model_dir / 'pca.pkl').exists() else 'no'}"
+        f" classifier={'yes' if (model_dir / 'classifier.pkl').exists() else 'no'}"
+        f" latent_scaler={scaler_status}"
+        f" latent_density={density_status}"
+        f"{density_summary}"
+    )
     return StageArtifacts(
         model=model,
         pca=pca,
@@ -218,6 +283,7 @@ def classify_sketch_detailed(
         nearest_label = best_rotation["nearest_label"]
         nearest_distance = float(best_rotation["dist"])
         nearest_threshold = float(best_rotation["threshold"])
+        _log_score_sample(recon_error, nearest_distance)
         if nearest_distance > nearest_threshold:
             message = "Novelty detected: unknown component."
             return ClassificationResult(
@@ -248,6 +314,7 @@ def classify_sketch_detailed(
             )
         if density is not None:
             nearest_label, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
+            _log_score_sample(recon_error, nearest_distance)
             if nearest_distance > nearest_threshold:
                 message = "Novelty detected: unknown component."
                 return ClassificationResult(
@@ -274,6 +341,8 @@ def classify_sketch_detailed(
                 nearest_threshold=None,
                 message=message,
             )
+        else:
+            _log_score_sample(recon_error, None)
     reduced = artifacts.pca.transform(normalized_latent)
     candidates, margin = _compute_candidates(artifacts, reduced, k=2)
     label = candidates[0][0] if candidates else None

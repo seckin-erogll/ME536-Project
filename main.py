@@ -10,6 +10,7 @@ from PIL import Image
 
 from circuit_gui import launch_circuit_gui
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.config import MAHALANOBIS_QUANTILE, MAHALANOBIS_THRESHOLD_SCALE
 from FH_Circuit.data import ensure_train_val_split, load_split_datasets
 from FH_Circuit.gui import launch_gui
 from FH_Circuit.train import train_pipeline
@@ -23,6 +24,17 @@ def _prompt_int(prompt: str, default: int) -> int:
         if raw.isdigit():
             return int(raw)
         print("Please enter a valid integer.")
+
+
+def _prompt_float(prompt: str, default: float) -> float:
+    while True:
+        raw = input(f"{prompt} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            print("Please enter a valid number.")
 
 
 def _prompt_path(prompt: str, default: Path) -> Path:
@@ -61,6 +73,10 @@ def run_train(args: argparse.Namespace) -> None:
         args.epochs = _prompt_int("Epochs", args.epochs)
         args.batch_size = _prompt_int("Batch size", args.batch_size)
         args.latent_dim = _prompt_int("Latent dimension", args.latent_dim)
+        args.mahalanobis_quantile = _prompt_float("Mahalanobis quantile", args.mahalanobis_quantile)
+        args.mahalanobis_threshold_scale = _prompt_float(
+            "Mahalanobis threshold scale", args.mahalanobis_threshold_scale
+        )
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
         args.output = _prompt_path("Output directory", args.output)
     ensure_train_val_split(args.dataset_dir)
@@ -85,6 +101,8 @@ def run_train(args: argparse.Namespace) -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         latent_dim=args.latent_dim,
+        mahalanobis_quantile=args.mahalanobis_quantile,
+        mahalanobis_threshold_scale=args.mahalanobis_threshold_scale,
         save_reconstructions_outputs=args.save_reconstructions,
     )
     print(f"Training complete. Artifacts saved to {args.output}.")
@@ -129,6 +147,18 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--epochs", type=int, default=5, help="Training epochs.")
     train.add_argument("--batch-size", type=int, default=32, help="Training batch size.")
     train.add_argument("--latent-dim", type=int, default=32, help="Latent embedding dimension.")
+    train.add_argument(
+        "--mahalanobis-quantile",
+        type=float,
+        default=MAHALANOBIS_QUANTILE,
+        help="Quantile for Mahalanobis thresholds (recommended 0.995–0.999).",
+    )
+    train.add_argument(
+        "--mahalanobis-threshold-scale",
+        type=float,
+        default=MAHALANOBIS_THRESHOLD_SCALE,
+        help="Scale factor for Mahalanobis thresholds (recommended 1.0–1.5).",
+    )
     train.add_argument(
         "--dataset-dir",
         type=Path,
