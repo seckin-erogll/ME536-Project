@@ -167,8 +167,24 @@ class CircuitSegmentationApp:
         self.canvas_height = 600
         self.artifacts = load_artifacts(model_dir)
 
-        self.image = Image.new("RGB", (self.canvas_width, self.canvas_height), "white")
-        self.draw = ImageDraw.Draw(self.image)
+        # Keep the raw drawing separate from annotated overlays.
+        self.raw_image = Image.new("RGB", (self.canvas_width, self.canvas_height), "white")
+        self.display_image = self.raw_image.copy()
+        self.draw = ImageDraw.Draw(self.raw_image)
+        self.tk_img: ImageTk.PhotoImage | None = None
+        self.overlay_active = False
+
+        # Segmentation parameters (tunable via sliders below).
+        self.segmentation_params = {
+            "blur_kernel": 40,
+            "threshold": 50,
+            "dilation_kernel": 15,
+            "min_area": 500,
+        }
+        self.blur_kernel_var = tk.IntVar(value=self.segmentation_params["blur_kernel"])
+        self.threshold_var = tk.IntVar(value=self.segmentation_params["threshold"])
+        self.dilation_kernel_var = tk.IntVar(value=self.segmentation_params["dilation_kernel"])
+        self.min_area_var = tk.IntVar(value=self.segmentation_params["min_area"])
 
         self.canvas = tk.Canvas(
             root,
@@ -187,9 +203,30 @@ class CircuitSegmentationApp:
         )
         self.segment_button.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 10))
 
+        settings_frame = ttk.LabelFrame(root, text="Segmentation Settings")
+        settings_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        settings_frame.columnconfigure(1, weight=1)
+
+        def _bind_scale(row: int, label: str, var: tk.IntVar, *, from_: int, to: int) -> None:
+            ttk.Label(settings_frame, text=label).grid(row=row, column=0, sticky="w", padx=8, pady=4)
+            scale = tk.Scale(
+                settings_frame,
+                from_=from_,
+                to=to,
+                orient=tk.HORIZONTAL,
+                variable=var,
+                command=lambda _value: self._update_segmentation_params_from_vars(),
+            )
+            scale.grid(row=row, column=1, sticky="ew", padx=8, pady=2)
+
+        _bind_scale(0, "Blur kernel", self.blur_kernel_var, from_=5, to=80)
+        _bind_scale(1, "Threshold", self.threshold_var, from_=1, to=255)
+        _bind_scale(2, "Dilation kernel", self.dilation_kernel_var, from_=1, to=40)
+        _bind_scale(3, "Min contour area", self.min_area_var, from_=50, to=5000)
+
         self.status = tk.StringVar(value="Draw a circuit and click Segment + Classify.")
         self.status_label = ttk.Label(root, textvariable=self.status)
-        self.status_label.grid(row=2, column=0, columnspan=2, pady=(0, 10))
+        self.status_label.grid(row=3, column=0, columnspan=2, pady=(0, 10))
 
         self.last_x: int | None = None
         self.last_y: int | None = None
@@ -199,7 +236,11 @@ class CircuitSegmentationApp:
         self.canvas.bind("<B1-Motion>", self.draw_line)
         self.canvas.bind("<ButtonRelease-1>", self.stop_draw)
 
+        self._refresh_display()
+
     def start_draw(self, event: tk.Event) -> None:
+        if self.overlay_active:
+            self._refresh_display()
         self.last_x = event.x
         self.last_y = event.y
 
@@ -230,22 +271,26 @@ class CircuitSegmentationApp:
         self.last_y = None
 
     def clear_canvas(self) -> None:
-        self.canvas.delete("all")
-        self.image = Image.new("RGB", (self.canvas_width, self.canvas_height), "white")
-        self.draw = ImageDraw.Draw(self.image)
+        self.raw_image = Image.new("RGB", (self.canvas_width, self.canvas_height), "white")
+        self.draw = ImageDraw.Draw(self.raw_image)
+        self.overlay_active = False
+        self._refresh_display()
         self.status.set("Canvas cleared.")
 
     def segment_components(self) -> None:
-        gray = np.array(self.image.convert("L"))
+        params = self._current_segmentation_params()
+        gray = self._get_raw_np()
 
         inverted = 255 - gray
         bin_img = (inverted > 0).astype(np.uint8) * 255
 
-        density_map = cv2.blur(inverted, (40, 40))
+        blur_kernel = params["blur_kernel"]
+        density_map = cv2.blur(inverted, (blur_kernel, blur_kernel))
 
-        _, dense_mask = cv2.threshold(density_map, 50, 255, cv2.THRESH_BINARY)
+        _, dense_mask = cv2.threshold(density_map, params["threshold"], 255, cv2.THRESH_BINARY)
 
-        kernel = np.ones((15, 15), np.uint8)
+        dilation_kernel = params["dilation_kernel"]
+        kernel = np.ones((dilation_kernel, dilation_kernel), np.uint8)
         refined = cv2.dilate(dense_mask, kernel, iterations=1)
 
         contours, _ = cv2.findContours(refined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -253,10 +298,12 @@ class CircuitSegmentationApp:
         boxed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         statuses: list[str] = []
         saw_novelty = False
+        overlay_drawn = False
+        min_area = params["min_area"]
         height, width = bin_img.shape[:2]
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < 500:
+            if area < min_area:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
             x, y, w, h = self._refine_bbox_by_pixels(bin_img, x, y, w, h, pad=10)
@@ -290,6 +337,7 @@ class CircuitSegmentationApp:
 
             color = (0, 128, 0) if not is_novelty else (0, 0, 255)
             cv2.rectangle(boxed, (x, y), (x + w, y + h), color, 2)
+            overlay_drawn = True
             cv2.putText(
                 boxed,
                 label,
@@ -310,6 +358,40 @@ class CircuitSegmentationApp:
             self.status.set("No components detected.")
 
         self._update_canvas_from_array(boxed)
+        self.overlay_active = overlay_drawn
+
+    def _update_segmentation_params_from_vars(self) -> None:
+        # Clamp values to keep OpenCV kernels valid.
+        self.segmentation_params["blur_kernel"] = max(1, int(self.blur_kernel_var.get()))
+        self.segmentation_params["threshold"] = int(self.threshold_var.get())
+        self.segmentation_params["dilation_kernel"] = max(1, int(self.dilation_kernel_var.get()))
+        self.segmentation_params["min_area"] = max(1, int(self.min_area_var.get()))
+
+    def _current_segmentation_params(self) -> dict[str, int]:
+        self._update_segmentation_params_from_vars()
+        return dict(self.segmentation_params)
+
+    def _get_raw_np(self) -> np.ndarray:
+        return np.array(self.raw_image.convert("L"))
+
+    def _set_display_from_np(self, arr: np.ndarray) -> None:
+        arr_uint8 = _as_uint8(arr)
+        if arr_uint8.ndim == 2:
+            array_rgb = cv2.cvtColor(arr_uint8, cv2.COLOR_GRAY2RGB)
+        else:
+            array_rgb = cv2.cvtColor(arr_uint8, cv2.COLOR_BGR2RGB)
+        self.display_image = Image.fromarray(array_rgb)
+        self._show_display_image()
+
+    def _show_display_image(self) -> None:
+        self.canvas.delete("all")
+        self.tk_img = ImageTk.PhotoImage(self.display_image)
+        self.canvas.create_image(0, 0, anchor="nw", image=self.tk_img)
+
+    def _refresh_display(self) -> None:
+        self.display_image = self.raw_image.copy()
+        self.overlay_active = False
+        self._show_display_image()
 
     def _classify_crop(self, gray: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[str, bool, str]:
         crop = self._prepare_crop(gray, x, y, w, h)
@@ -751,15 +833,9 @@ class CircuitSegmentationApp:
         y0, y1 = ys.min(), ys.max()
         return int(x0), int(y0), int(x1), int(y1)
 
-    def _update_canvas_from_array(self, array_bgr):
-        array_rgb = cv2.cvtColor(array_bgr, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(array_rgb)
-        self.image = pil_image
-        self.draw = ImageDraw.Draw(self.image)
-
-        self.canvas.delete("all")
-        self._tk_image = ImageTk.PhotoImage(self.image)
-        self.canvas.create_image(0, 0, anchor="nw", image=self._tk_image)
+    def _update_canvas_from_array(self, array_bgr: np.ndarray) -> None:
+        # Legacy name kept for compatibility; update display only.
+        self._set_display_from_np(array_bgr)
 
 
 def launch_circuit_gui(model_dir: Path, dataset_dir: Path) -> None:
