@@ -173,6 +173,9 @@ class CircuitSegmentationApp:
         crop = gray[y0:y1, x0:x1]
         if crop.size == 0:
             return "Unknown", False, "Empty crop"
+        # The classifier expects light foreground on a dark background.
+        # Circuit GUI uses a white background with black strokes, so invert.
+        crop = 255 - crop
         try:
             result = classify_sketch(self.artifacts, crop)
         except ValueError as exc:
