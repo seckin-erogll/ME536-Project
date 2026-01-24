@@ -86,9 +86,15 @@ def segment_symbols(binary_img: np.ndarray) -> list[tuple[int, int, int, int]]:
         for y, x in edge["pixels"]:
             symbol_mask[y, x] = 255
 
-    # Dilate lightly so symbol fragments reconnect without flooding wires.
-    symbol_mask = cv2.dilate(symbol_mask, np.ones((3, 3), np.uint8), iterations=1)
-    # Retain dense regions that may have been thinned by skeletonization.
+    # Reinflate skeleton strokes using the estimated stroke width.
+    recon_k = max(3, int(round(stroke_w)))
+    if recon_k % 2 == 0:
+        recon_k += 1
+    recon_kernel = np.ones((recon_k, recon_k), np.uint8)
+    symbol_mask = cv2.dilate(symbol_mask, recon_kernel, iterations=1)
+    wire_mask = cv2.dilate(wire_mask, recon_kernel, iterations=1)
+
+    # Clamp to the original drawing and remove the thickened wire regions.
     symbol_mask = cv2.bitwise_and(symbol_mask, binary)
     symbol_mask[wire_mask > 0] = 0
 
@@ -99,36 +105,36 @@ def _find_nodes(skel01: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.uint8)
     degree = cv2.filter2D(skel01, -1, kernel, borderType=cv2.BORDER_CONSTANT)
     nodes_mask = (skel01 == 1) & (degree != 2)
+
+    # Promote sharp bends (degree-2 corners) to nodes so loops split into edges.
+    corner_mask = np.zeros_like(nodes_mask, dtype=bool)
+    corner_cos = math.cos(math.radians(30.0))
+    for y, x in np.column_stack(np.where((skel01 == 1) & (degree == 2))):
+        neigh = _iter_neighbors(skel01, int(y), int(x))
+        if len(neigh) != 2:
+            continue
+        (y1, x1), (y2, x2) = neigh
+        v1 = np.array([y1 - y, x1 - x], dtype=np.float32)
+        v2 = np.array([y2 - y, x2 - x], dtype=np.float32)
+        denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
+        if denom <= 1e-6:
+            continue
+        dot = float(np.dot(v1, v2) / denom)
+        if dot > -corner_cos:
+            corner_mask[int(y), int(x)] = True
+
+    nodes_mask = nodes_mask | corner_mask
     return nodes_mask, degree
 
 
 def _trace_edges(skel01: np.ndarray, nodes_mask: np.ndarray, degree: np.ndarray) -> list[dict]:
-    neighbors = [
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, -1),
-        (0, 1),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-    ]
-    height, width = skel01.shape
     node_points = np.column_stack(np.where(nodes_mask))
 
     visited: set[tuple[int, int, int, int]] = set()
     edges: list[dict] = []
 
-    def iter_neighbors(y: int, x: int) -> list[tuple[int, int]]:
-        out: list[tuple[int, int]] = []
-        for dy, dx in neighbors:
-            ny, nx = y + dy, x + dx
-            if 0 <= ny < height and 0 <= nx < width and skel01[ny, nx]:
-                out.append((ny, nx))
-        return out
-
     for y0, x0 in node_points:
-        for ny, nx in iter_neighbors(int(y0), int(x0)):
+        for ny, nx in _iter_neighbors(skel01, int(y0), int(x0)):
             key = (int(y0), int(x0), int(ny), int(nx))
             if key in visited:
                 continue
@@ -140,7 +146,7 @@ def _trace_edges(skel01: np.ndarray, nodes_mask: np.ndarray, degree: np.ndarray)
             curr = (int(ny), int(nx))
 
             while not nodes_mask[curr] and degree[curr] == 2:
-                next_candidates = [p for p in iter_neighbors(*curr) if p != prev]
+                next_candidates = [p for p in _iter_neighbors(skel01, *curr) if p != prev]
                 if not next_candidates:
                     break
                 nxt = next_candidates[0]
@@ -161,9 +167,30 @@ def _trace_edges(skel01: np.ndarray, nodes_mask: np.ndarray, degree: np.ndarray)
     return edges
 
 
+def _iter_neighbors(skel01: np.ndarray, y: int, x: int) -> list[tuple[int, int]]:
+    neighbors = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    ]
+    height, width = skel01.shape
+    out: list[tuple[int, int]] = []
+    for dy, dx in neighbors:
+        ny, nx = y + dy, x + dx
+        if 0 <= ny < height and 0 <= nx < width and skel01[ny, nx]:
+            out.append((ny, nx))
+    return out
+
+
 def _density_map(binary: np.ndarray, stroke_w: float) -> np.ndarray:
     binary_float = (binary > 0).astype(np.float32)
-    k = max(9, int(round(3 * stroke_w)))
+    # Use a wider window so a lone wire has low density while dense symbols stay high.
+    k = max(25, int(round(8 * stroke_w)))
     if k % 2 == 0:
         k += 1
     return cv2.blur(binary_float, (k, k))
@@ -184,7 +211,8 @@ def _wire_mask_from_edges(
     # Scale wire thresholds by the estimated stroke width to reduce hand-tuning.
     l_min = max(40.0, 20.0 * stroke_w)
     tau_max = 1.20
-    density_thresh = 0.15
+    # With the larger density window, this mainly guards dense symbol interiors.
+    density_thresh = 0.18
 
     wire_mask = np.zeros((height, width), dtype=np.uint8)
 
