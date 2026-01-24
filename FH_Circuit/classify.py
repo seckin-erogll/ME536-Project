@@ -17,7 +17,7 @@ from sklearn.svm import SVC
 if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
+from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD, MSE_NOISE_THRESHOLD
 from FH_Circuit.latent_density import LatentDensityArtifacts, distance_to_label, nearest_class
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
@@ -112,6 +112,7 @@ def classify_sketch(
     sketch: np.ndarray,
     error_threshold: float = ERROR_THRESHOLD,
     ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
+    noise_threshold: float = MSE_NOISE_THRESHOLD,
 ) -> str:
     processed = preprocess(sketch)
     tensor = torch.from_numpy(processed).unsqueeze(0).unsqueeze(0).float()
@@ -123,6 +124,8 @@ def classify_sketch(
         else:
             recon, latent, _ = outputs
     recon_error = torch.mean((recon - tensor) ** 2).item()
+    if recon_error > noise_threshold:
+        return "Novelty detected: sketch too noisy."
     normalized_latent = artifacts.latent_scaler.transform(latent.cpu().numpy())
     density = artifacts.latent_density
     if density is not None:
