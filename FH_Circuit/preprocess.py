@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import math
+
+import cv2
 import numpy as np
 from PIL import Image
 from numpy.lib.stride_tricks import sliding_window_view
+from skimage.morphology import skeletonize
 
 from FH_Circuit.config import IMAGE_SIZE, MIN_AREA
 
@@ -20,6 +24,343 @@ def preprocess(image: np.ndarray, min_area: int = MIN_AREA) -> np.ndarray:
     dilated = _binary_dilation(binary, footprint)
     closed = _binary_closing(dilated, footprint)
     return closed.astype(np.float32)
+
+
+def estimate_stroke_width(binary_img: np.ndarray) -> float:
+    """Estimate stroke width using a distance transform sampled on the skeleton."""
+    binary = (binary_img > 0).astype(np.uint8)
+    if binary.sum() == 0:
+        return 1.0
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 3)
+    skel = skeletonize_binary(binary_img)
+    skel_mask = skel > 0
+    samples = dist[skel_mask]
+    if samples.size == 0:
+        samples = dist[binary > 0]
+    if samples.size == 0:
+        return 1.0
+    stroke_w = max(1.0, float(2.0 * np.median(samples)))
+    return stroke_w
+
+
+def skeletonize_binary(binary_img: np.ndarray) -> np.ndarray:
+    """Skeletonize a binary drawing, returning a uint8 mask in {0, 255}."""
+    binary = (binary_img > 0).astype(np.uint8) * 255
+    if cv2.countNonZero(binary) == 0:
+        return np.zeros_like(binary, dtype=np.uint8)
+    # A light closing helps bridge tiny sketch gaps before skeletonization.
+    kernel = np.ones((3, 3), np.uint8)
+    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    skel_bool = skeletonize(closed > 0)
+    return skel_bool.astype(np.uint8) * 255
+
+
+def segment_symbols(binary_img: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Segment circuit symbols by removing long, straight wire edges."""
+    binary = (binary_img > 0).astype(np.uint8) * 255
+    if cv2.countNonZero(binary) == 0:
+        return []
+
+    stroke_w = estimate_stroke_width(binary)
+    skel = skeletonize_binary(binary)
+    skel01 = (skel > 0).astype(np.uint8)
+
+    nodes_mask, degree = _find_nodes(skel01)
+    node_points = np.column_stack(np.where(nodes_mask))
+
+    # If there are no skeleton nodes, fall back to the original binary mask.
+    if node_points.size == 0:
+        return _components_from_mask(binary, stroke_w)
+
+    edges = _trace_edges(skel01, nodes_mask, degree)
+    if not edges:
+        return _components_from_mask(binary, stroke_w)
+
+    density_map = _density_map(binary, stroke_w)
+    wire_mask = _wire_mask_from_edges(edges, nodes_mask, density_map, stroke_w)
+
+    symbol_mask = np.zeros_like(binary, dtype=np.uint8)
+    for edge in edges:
+        if edge["is_wire"]:
+            continue
+        for y, x in edge["pixels"]:
+            symbol_mask[y, x] = 255
+
+    # Dilate lightly so symbol fragments reconnect without flooding wires.
+    symbol_mask = cv2.dilate(symbol_mask, np.ones((3, 3), np.uint8), iterations=1)
+    # Retain dense regions that may have been thinned by skeletonization.
+    symbol_mask = cv2.bitwise_and(symbol_mask, binary)
+    symbol_mask[wire_mask > 0] = 0
+
+    return _components_from_mask(symbol_mask, stroke_w)
+
+
+def _find_nodes(skel01: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.uint8)
+    degree = cv2.filter2D(skel01, -1, kernel, borderType=cv2.BORDER_CONSTANT)
+    nodes_mask = (skel01 == 1) & (degree != 2)
+    return nodes_mask, degree
+
+
+def _trace_edges(skel01: np.ndarray, nodes_mask: np.ndarray, degree: np.ndarray) -> list[dict]:
+    neighbors = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    ]
+    height, width = skel01.shape
+    node_points = np.column_stack(np.where(nodes_mask))
+
+    visited: set[tuple[int, int, int, int]] = set()
+    edges: list[dict] = []
+
+    def iter_neighbors(y: int, x: int) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        for dy, dx in neighbors:
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < height and 0 <= nx < width and skel01[ny, nx]:
+                out.append((ny, nx))
+        return out
+
+    for y0, x0 in node_points:
+        for ny, nx in iter_neighbors(int(y0), int(x0)):
+            key = (int(y0), int(x0), int(ny), int(nx))
+            if key in visited:
+                continue
+            visited.add(key)
+            visited.add((int(ny), int(nx), int(y0), int(x0)))
+
+            pixels: list[tuple[int, int]] = [(int(y0), int(x0)), (int(ny), int(nx))]
+            prev = (int(y0), int(x0))
+            curr = (int(ny), int(nx))
+
+            while not nodes_mask[curr] and degree[curr] == 2:
+                next_candidates = [p for p in iter_neighbors(*curr) if p != prev]
+                if not next_candidates:
+                    break
+                nxt = next_candidates[0]
+                visited.add((curr[0], curr[1], nxt[0], nxt[1]))
+                visited.add((nxt[0], nxt[1], curr[0], curr[1]))
+                pixels.append(nxt)
+                prev, curr = curr, nxt
+
+            edge = {
+                "start": (int(y0), int(x0)),
+                "end": curr,
+                "pixels": pixels,
+                "length": float(len(pixels)),
+                "is_wire": False,
+            }
+            edges.append(edge)
+
+    return edges
+
+
+def _density_map(binary: np.ndarray, stroke_w: float) -> np.ndarray:
+    binary_float = (binary > 0).astype(np.float32)
+    k = max(9, int(round(3 * stroke_w)))
+    if k % 2 == 0:
+        k += 1
+    return cv2.blur(binary_float, (k, k))
+
+
+def _wire_mask_from_edges(
+    edges: list[dict], nodes_mask: np.ndarray, density_map: np.ndarray, stroke_w: float
+) -> np.ndarray:
+    height, width = nodes_mask.shape
+    node_mask_u8 = nodes_mask.astype(np.uint8)
+    protect_radius = max(2.0, 2.0 * stroke_w)
+    if node_mask_u8.any():
+        node_dt = cv2.distanceTransform((node_mask_u8 == 0).astype(np.uint8), cv2.DIST_L2, 3)
+        protect_mask = node_dt <= protect_radius
+    else:
+        protect_mask = np.zeros_like(node_mask_u8, dtype=bool)
+
+    # Scale wire thresholds by the estimated stroke width to reduce hand-tuning.
+    l_min = max(40.0, 20.0 * stroke_w)
+    tau_max = 1.20
+    density_thresh = 0.15
+
+    wire_mask = np.zeros((height, width), dtype=np.uint8)
+
+    for edge in edges:
+        start = edge["start"]
+        end = edge["end"]
+        dy = float(end[0] - start[0])
+        dx = float(end[1] - start[1])
+        d = math.hypot(dx, dy)
+        l = edge["length"]
+        tau = l / (d + 1e-5)
+
+        ys = np.fromiter((p[0] for p in edge["pixels"]), dtype=np.int32)
+        xs = np.fromiter((p[1] for p in edge["pixels"]), dtype=np.int32)
+        mean_density = float(density_map[ys, xs].mean()) if ys.size else 0.0
+        near_dense_region = mean_density > density_thresh
+
+        is_wire = (l > l_min) and (tau < tau_max) and (not near_dense_region)
+        edge["is_wire"] = bool(is_wire)
+        if not is_wire:
+            continue
+
+        for y, x in edge["pixels"]:
+            if protect_mask[y, x]:
+                continue
+            wire_mask[y, x] = 255
+
+    return wire_mask
+
+
+def _components_from_mask(mask: np.ndarray, stroke_w: float) -> list[tuple[int, int, int, int]]:
+    mask_u8 = (mask > 0).astype(np.uint8) * 255
+    if cv2.countNonZero(mask_u8) == 0:
+        return []
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8)
+    image_area = mask_u8.shape[0] * mask_u8.shape[1]
+    a_min = max(10.0, 15.0 * (stroke_w ** 2))
+
+    components: list[dict] = []
+    for label in range(1, num_labels):
+        area = float(stats[label, cv2.CC_STAT_AREA])
+        if area < a_min:
+            continue
+        comp_mask = labels == label
+        ys, xs = np.where(comp_mask)
+        if xs.size == 0:
+            continue
+        x0, x1 = int(xs.min()), int(xs.max())
+        y0, y1 = int(ys.min()), int(ys.max())
+        w = x1 - x0 + 1
+        h = y1 - y0 + 1
+        orientation = _component_orientation(xs, ys)
+        linear = _is_linear_blob(w, h)
+        components.append(
+            {
+                "pixels": np.column_stack((ys, xs)),
+                "bbox": (x0, y0, w, h),
+                "area": float(len(xs)),
+                "theta": orientation,
+                "linear": linear,
+            }
+        )
+
+    merged = _merge_components(components, stroke_w, image_area)
+    return [comp["bbox"] for comp in merged]
+
+
+def _component_orientation(xs: np.ndarray, ys: np.ndarray) -> float:
+    if xs.size < 2:
+        return 0.0
+    pts = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))
+    vx, vy, _, _ = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+    vx_f = float(vx[0]) if np.ndim(vx) else float(vx)
+    vy_f = float(vy[0]) if np.ndim(vy) else float(vy)
+    theta = math.degrees(math.atan2(vy_f, vx_f))
+    theta = theta % 180.0
+    return theta
+
+
+def _is_linear_blob(w: int, h: int) -> bool:
+    short = max(1, min(w, h))
+    long = max(w, h)
+    aspect = long / short
+    return aspect >= 3.0
+
+
+def _merge_components(components: list[dict], stroke_w: float, image_area: int) -> list[dict]:
+    if not components:
+        return []
+
+    gap_thresh = 6.0 * stroke_w
+    special_gap = 8.0 * stroke_w
+    max_area = 0.25 * float(image_area)
+
+    comps = components[:]
+    changed = True
+    while changed and len(comps) > 1:
+        changed = False
+        i = 0
+        while i < len(comps):
+            j = i + 1
+            while j < len(comps):
+                b1 = comps[i]["bbox"]
+                b2 = comps[j]["bbox"]
+                dist = bbox_distance(b1, b2)
+                union_bbox = _union_bbox(b1, b2)
+                union_area = float(union_bbox[2] * union_bbox[3])
+
+                parallel_merge = (
+                    comps[i]["linear"]
+                    and comps[j]["linear"]
+                    and _angle_diff(comps[i]["theta"], comps[j]["theta"]) < 15.0
+                    and dist < special_gap
+                )
+
+                close_merge = dist < gap_thresh and union_area < max_area
+
+                if parallel_merge or close_merge:
+                    comps[i] = _combine_components(comps[i], comps[j])
+                    comps.pop(j)
+                    changed = True
+                    continue
+                j += 1
+            i += 1
+
+    return comps
+
+
+def bbox_distance(b1: tuple[int, int, int, int], b2: tuple[int, int, int, int]) -> float:
+    x1, y1, w1, h1 = b1
+    x2, y2, w2, h2 = b2
+    x1_max = x1 + w1
+    y1_max = y1 + h1
+    x2_max = x2 + w2
+    y2_max = y2 + h2
+
+    dx = max(x2 - x1_max, x1 - x2_max, 0)
+    dy = max(y2 - y1_max, y1 - y2_max, 0)
+    if dx > 0 and dy > 0:
+        return math.hypot(dx, dy)
+    return float(max(dx, dy))
+
+
+def _union_bbox(b1: tuple[int, int, int, int], b2: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    x1, y1, w1, h1 = b1
+    x2, y2, w2, h2 = b2
+    x0 = min(x1, x2)
+    y0 = min(y1, y2)
+    x1_max = max(x1 + w1, x2 + w2)
+    y1_max = max(y1 + h1, y2 + h2)
+    return x0, y0, x1_max - x0, y1_max - y0
+
+
+def _angle_diff(theta1: float, theta2: float) -> float:
+    diff = abs(theta1 - theta2) % 180.0
+    return min(diff, 180.0 - diff)
+
+
+def _combine_components(c1: dict, c2: dict) -> dict:
+    pixels = np.vstack((c1["pixels"], c2["pixels"]))
+    ys = pixels[:, 0]
+    xs = pixels[:, 1]
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    w = x1 - x0 + 1
+    h = y1 - y0 + 1
+    theta = _component_orientation(xs, ys)
+    linear = _is_linear_blob(w, h)
+    return {
+        "pixels": pixels,
+        "bbox": (x0, y0, w, h),
+        "area": float(len(xs)),
+        "theta": theta,
+        "linear": linear,
+    }
 
 
 def _normalize_to_canvas(binary: np.ndarray) -> np.ndarray:

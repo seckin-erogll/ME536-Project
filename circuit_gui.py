@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+from FH_Circuit.preprocess import segment_symbols
 
 
 class CircuitSegmentationApp:
@@ -95,24 +96,13 @@ class CircuitSegmentationApp:
         inverted = 255 - gray
         bin_img = (inverted > 0).astype(np.uint8) * 255
 
-        density_map = cv2.blur(inverted, (40, 40))
-
-        _, dense_mask = cv2.threshold(density_map, 50, 255, cv2.THRESH_BINARY)
-
-        kernel = np.ones((15, 15), np.uint8)
-        refined = cv2.dilate(dense_mask, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(refined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        bboxes = segment_symbols(bin_img)
 
         boxed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         statuses = []
         saw_novelty = False
         height, width = bin_img.shape[:2]
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 500:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
+        for x, y, w, h in bboxes:
             x, y, w, h = self._refine_bbox_by_pixels(bin_img, x, y, w, h, pad=10)
             x0 = max(0, x)
             y0 = max(0, y)
