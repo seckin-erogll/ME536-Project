@@ -175,36 +175,57 @@ class CircuitSegmentationApp:
         self.overlay_active = False
 
         # Segmentation parameters (tunable via sliders below).
-        self.segmentation_params = {
+        self.segmentation_defaults = {
             "blur_kernel": 40,
             "threshold": 50,
             "dilation_kernel": 15,
             "min_area": 500,
         }
+        self.segmentation_params = dict(self.segmentation_defaults)
         self.blur_kernel_var = tk.IntVar(value=self.segmentation_params["blur_kernel"])
         self.threshold_var = tk.IntVar(value=self.segmentation_params["threshold"])
         self.dilation_kernel_var = tk.IntVar(value=self.segmentation_params["dilation_kernel"])
         self.min_area_var = tk.IntVar(value=self.segmentation_params["min_area"])
 
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+
+        self.notebook = ttk.Notebook(root)
+        self.notebook.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+
+        self.draw_tab = ttk.Frame(self.notebook)
+        self.settings_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.draw_tab, text="Draw")
+        self.notebook.add(self.settings_tab, text="Segmentation Settings")
+
+        for col in range(3):
+            self.draw_tab.columnconfigure(col, weight=1)
+
         self.canvas = tk.Canvas(
-            root,
+            self.draw_tab,
             width=self.canvas_width,
             height=self.canvas_height,
             bg="white",
             cursor="pencil",
         )
-        self.canvas.grid(row=0, column=0, columnspan=2, padx=10, pady=10)
+        self.canvas.grid(row=0, column=0, columnspan=3, padx=0, pady=(0, 10))
 
-        self.clear_button = ttk.Button(root, text="Clear", command=self.clear_canvas)
-        self.clear_button.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self.clear_button = ttk.Button(self.draw_tab, text="Clear", command=self.clear_canvas)
+        self.clear_button.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(0, 10))
 
         self.segment_button = ttk.Button(
-            root, text="Segment + Classify", command=self.segment_components
+            self.draw_tab, text="Segment + Classify", command=self.segment_components
         )
-        self.segment_button.grid(row=1, column=1, sticky="ew", padx=10, pady=(0, 10))
+        self.segment_button.grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 10))
 
-        settings_frame = ttk.LabelFrame(root, text="Segmentation Settings")
-        settings_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
+        self.settings_button = ttk.Button(
+            self.draw_tab, text="Segmentation Settings", command=self._open_settings_tab
+        )
+        self.settings_button.grid(row=1, column=2, sticky="ew", padx=(6, 0), pady=(0, 10))
+
+        settings_frame = ttk.LabelFrame(self.settings_tab, text="Segmentation Settings")
+        settings_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 8))
+        self.settings_tab.columnconfigure(0, weight=1)
         settings_frame.columnconfigure(1, weight=1)
 
         def _bind_scale(row: int, label: str, var: tk.IntVar, *, from_: int, to: int) -> None:
@@ -224,9 +245,13 @@ class CircuitSegmentationApp:
         _bind_scale(2, "Dilation kernel", self.dilation_kernel_var, from_=1, to=40)
         _bind_scale(3, "Min contour area", self.min_area_var, from_=50, to=5000)
 
+        ttk.Button(settings_frame, text="Reset Defaults", command=self._reset_segmentation_defaults).grid(
+            row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 6)
+        )
+
         self.status = tk.StringVar(value="Draw a circuit and click Segment + Classify.")
-        self.status_label = ttk.Label(root, textvariable=self.status)
-        self.status_label.grid(row=3, column=0, columnspan=2, pady=(0, 10))
+        self.status_label = ttk.Label(self.draw_tab, textvariable=self.status)
+        self.status_label.grid(row=2, column=0, columnspan=3, pady=(0, 4))
 
         self.last_x: int | None = None
         self.last_y: int | None = None
@@ -370,6 +395,19 @@ class CircuitSegmentationApp:
     def _current_segmentation_params(self) -> dict[str, int]:
         self._update_segmentation_params_from_vars()
         return dict(self.segmentation_params)
+
+    def _open_settings_tab(self) -> None:
+        self.notebook.select(self.settings_tab)
+
+    def _reset_segmentation_defaults(self) -> None:
+        for key, var in (
+            ("blur_kernel", self.blur_kernel_var),
+            ("threshold", self.threshold_var),
+            ("dilation_kernel", self.dilation_kernel_var),
+            ("min_area", self.min_area_var),
+        ):
+            var.set(self.segmentation_defaults[key])
+        self._update_segmentation_params_from_vars()
 
     def _get_raw_np(self) -> np.ndarray:
         return np.array(self.raw_image.convert("L"))
