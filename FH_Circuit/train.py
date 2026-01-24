@@ -312,6 +312,8 @@ def train_stage(
     latent_dim: int,
     class_loss_weight: float,
     save_reconstructions_outputs: bool,
+    mahalanobis_quantile: float,
+    mahalanobis_threshold_scale: float,
 ) -> None:
     train_dataset = SymbolDataset(train_samples, labels, transform=build_training_transforms())
     val_dataset = SymbolDataset(val_samples, labels)
@@ -335,8 +337,8 @@ def train_stage(
         sample_labels,
         labels,
         reg_eps=MAHALANOBIS_REG_EPS,
-        quantile=MAHALANOBIS_QUANTILE,
-        threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
+        quantile=mahalanobis_quantile,
+        threshold_scale=mahalanobis_threshold_scale,
     )
     combined = latents_norm
     components = min(latent_dim, 16)
@@ -367,6 +369,8 @@ def train_pipeline(
     latent_dim: int = 32,
     class_loss_weight: float = 0.3,
     save_reconstructions_outputs: bool = False,
+    mahalanobis_quantile: float = MAHALANOBIS_QUANTILE,
+    mahalanobis_threshold_scale: float = MAHALANOBIS_THRESHOLD_SCALE,
 ) -> None:
     print(f"Training single-stage classifier with labels: {', '.join(labels)}")
     train_stage(
@@ -379,6 +383,8 @@ def train_pipeline(
         latent_dim=latent_dim,
         class_loss_weight=class_loss_weight,
         save_reconstructions_outputs=save_reconstructions_outputs,
+        mahalanobis_quantile=mahalanobis_quantile,
+        mahalanobis_threshold_scale=mahalanobis_threshold_scale,
     )
 
 

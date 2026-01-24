@@ -717,7 +717,7 @@ class CircuitSegmentationApp:
         if crop.size == 0:
             return None
         crop = 255 - crop
-        return self._normalize_crop(crop)
+        return crop
 
     def _normalize_crop(self, crop_light: np.ndarray) -> np.ndarray:
         crop_light = _as_uint8(crop_light)
