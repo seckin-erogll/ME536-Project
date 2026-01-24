@@ -24,8 +24,14 @@ if __package__ is None:
 
 from FH_Circuit.data import Sample
 from FH_Circuit.dataset import SymbolDataset
+from FH_Circuit.latent_density import LatentDensityArtifacts, compute_latent_density
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
+from FH_Circuit.config import (
+    MAHALANOBIS_QUANTILE,
+    MAHALANOBIS_REG_EPS,
+    MAHALANOBIS_THRESHOLD_SCALE,
+)
 
 
 def resolve_device() -> torch.device:
@@ -245,6 +251,7 @@ def save_artifacts(
     labels: List[str],
     latent_scaler: StandardScaler,
     model_type: str,
+    latent_density: LatentDensityArtifacts,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -263,6 +270,8 @@ def save_artifacts(
         pickle.dump(classifier, file)
     with (output_dir / "latent_scaler.pkl").open("wb") as file:
         pickle.dump(latent_scaler, file)
+    with (output_dir / "latent_density.pkl").open("wb") as file:
+        pickle.dump(latent_density, file)
 
 
 def train_stage(
@@ -293,6 +302,14 @@ def train_stage(
     latents, sample_labels = extract_latents(model, eval_dataset)
     latent_scaler = StandardScaler()
     latents_norm = latent_scaler.fit_transform(latents)
+    latent_density = compute_latent_density(
+        latents_norm,
+        sample_labels,
+        labels,
+        reg_eps=MAHALANOBIS_REG_EPS,
+        quantile=MAHALANOBIS_QUANTILE,
+        threshold_scale=MAHALANOBIS_THRESHOLD_SCALE,
+    )
     combined = latents_norm
     components = min(latent_dim, 16)
     pca, classifier = fit_pca_classifier(combined, sample_labels, components)
@@ -305,6 +322,7 @@ def train_stage(
         labels,
         latent_scaler,
         model_type="supervised",
+        latent_density=latent_density,
     )
     if save_reconstructions_outputs:
         print(f"Saving reconstructions to: {output_dir / 'reconstructions'}")

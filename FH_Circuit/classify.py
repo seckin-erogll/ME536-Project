@@ -18,6 +18,7 @@ if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from FH_Circuit.config import AMBIGUITY_THRESHOLD, ERROR_THRESHOLD
+from FH_Circuit.latent_density import LatentDensityArtifacts, distance_to_label, nearest_class
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
 
@@ -29,6 +30,7 @@ class StageArtifacts:
     classifier: SVC
     labels: List[str]
     latent_scaler: StandardScaler
+    latent_density: LatentDensityArtifacts | None
 
 
 def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
@@ -63,12 +65,18 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         latent_scaler.var_ = np.ones(checkpoint["latent_dim"], dtype=np.float64)
         latent_scaler.n_features_in_ = checkpoint["latent_dim"]
         latent_scaler.n_samples_seen_ = 1
+    latent_density_path = model_dir / "latent_density.pkl"
+    latent_density = None
+    if latent_density_path.exists():
+        with latent_density_path.open("rb") as file:
+            latent_density = pickle.load(file)
     return StageArtifacts(
         model=model,
         pca=pca,
         classifier=classifier,
         labels=labels,
         latent_scaler=latent_scaler,
+        latent_density=latent_density,
     )
 
 
@@ -115,11 +123,21 @@ def classify_sketch(
         else:
             recon, latent, _ = outputs
     recon_error = torch.mean((recon - tensor) ** 2).item()
-    if recon_error > error_threshold:
-        return "Novelty detected: unknown component."
     normalized_latent = artifacts.latent_scaler.transform(latent.cpu().numpy())
+    density = artifacts.latent_density
+    if density is not None:
+        _, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
+        if nearest_distance > nearest_threshold:
+            return "Novelty detected: unknown component."
+    elif recon_error > error_threshold:
+        return "Novelty detected: unknown component."
     reduced = artifacts.pca.transform(normalized_latent)
     label, ambiguous = _predict_label(artifacts, reduced, ambiguity_threshold)
+    if density is not None and label:
+        predicted_distance = distance_to_label(normalized_latent[0], label, density)
+        predicted_threshold = density.class_stats[label].threshold
+        if predicted_distance > predicted_threshold:
+            return "Novelty detected: unknown component."
     if ambiguous or not label:
         return "Ambiguity detected: ask user to clarify between closest symbols."
     return f"Detected: {label}"
