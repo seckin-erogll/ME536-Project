@@ -510,8 +510,16 @@ class CircuitSegmentationApp:
                 row=2 + idx, column=0, columnspan=2, sticky="ew", padx=12, pady=4
             )
 
+        ttk.Button(dialog, text="Mark as Noise", command=lambda: choose("noise")).grid(
+            row=2 + len(top_candidates), column=0, columnspan=2, sticky="ew", padx=12, pady=6
+        )
+
         self.root.wait_window(dialog)
 
+        if selection["label"] == "noise":
+            discarded_path = self._save_discarded_sample(crop)
+            self.status.set(f"Discarded noisy crop: {discarded_path.name}")
+            return "Noise"
         if selection["label"]:
             saved_path = self._save_dataset_sample(selection["label"], crop, hard_example=True)
             self.status.set(f"Saved hard example: {saved_path.name}")
