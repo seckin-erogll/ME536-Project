@@ -510,8 +510,16 @@ class CircuitSegmentationApp:
                 row=2 + idx, column=0, columnspan=2, sticky="ew", padx=12, pady=4
             )
 
+        ttk.Button(dialog, text="Mark as Noise", command=lambda: choose("noise")).grid(
+            row=2 + len(top_candidates), column=0, columnspan=2, sticky="ew", padx=12, pady=6
+        )
+
         self.root.wait_window(dialog)
 
+        if selection["label"] == "noise":
+            discarded_path = self._save_discarded_sample(crop)
+            self.status.set(f"Discarded noisy crop: {discarded_path.name}")
+            return "Noise"
         if selection["label"]:
             saved_path = self._save_dataset_sample(selection["label"], crop, hard_example=True)
             self.status.set(f"Saved hard example: {saved_path.name}")
@@ -519,9 +527,16 @@ class CircuitSegmentationApp:
         return None
 
     def _handle_review(self, crop: np.ndarray, result: dict) -> tuple[str | None, bool]:
-        top_candidates = result.get("topk", [])[:3]
-        if not top_candidates:
-            top_candidates = [(label, 0.0) for label in self.artifacts.labels[:3]]
+        min_confidence = self.classifier_params.get("min_confidence", 0.30)
+        max_proba = result.get("max_proba", 0.0)
+        if max_proba is None:
+            max_proba = 0.0
+        is_low_confidence = max_proba < min_confidence
+        top_candidates: list[tuple[str, float]] = []
+        if not is_low_confidence:
+            top_candidates = result.get("topk", [])[:3]
+            if not top_candidates:
+                top_candidates = [(label, 0.0) for label in self.artifacts.labels[:3]]
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Needs review")
@@ -536,7 +551,7 @@ class CircuitSegmentationApp:
 
         reasons = result.get("reasons", [])
         reason_text = "/".join(reasons) if reasons else "unknown"
-        conf = result.get("max_proba", 0.0) * 100
+        conf = max_proba * 100
         ttk.Label(
             dialog,
             text=f"Needs review (novel/noise). Reasons: {reason_text}. Conf={conf:.1f}%",
@@ -557,11 +572,12 @@ class CircuitSegmentationApp:
             row=2, column=1, sticky="ew", padx=12, pady=(0, 6)
         )
 
-        for idx, (label_name, prob) in enumerate(top_candidates):
-            text = f"{label_name} ({prob * 100:.1f}%)"
-            ttk.Button(dialog, text=text, command=lambda name=label_name: choose(name)).grid(
-                row=3 + idx, column=0, columnspan=2, sticky="ew", padx=12, pady=4
-            )
+        if not is_low_confidence:
+            for idx, (label_name, prob) in enumerate(top_candidates):
+                text = f"{label_name} ({prob * 100:.1f}%)"
+                ttk.Button(
+                    dialog, text=text, command=lambda name=label_name: choose(name)
+                ).grid(row=3 + idx, column=0, columnspan=2, sticky="ew", padx=12, pady=4)
 
         self.root.wait_window(dialog)
 
