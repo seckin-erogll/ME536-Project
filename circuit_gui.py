@@ -377,6 +377,9 @@ class CircuitSegmentationApp:
             statuses.append(status)
             saw_review = saw_review or status_label == "REVIEW"
 
+            if label == "Noise":
+                continue
+
             if status_label == "OK":
                 color = (0, 128, 0)
             elif status_label == "AMBIGUITY":
