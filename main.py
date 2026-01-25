@@ -86,6 +86,10 @@ def run_train(args: argparse.Namespace) -> None:
         batch_size=args.batch_size,
         latent_dim=args.latent_dim,
         save_reconstructions_outputs=args.save_reconstructions,
+        use_ocsvm=args.use_ocsvm,
+        ocsvm_nu=args.ocsvm_nu,
+        ocsvm_gamma=args.ocsvm_gamma,
+        novelty_recon_quantile=args.novelty_recon_quantile,
     )
     print(f"Training complete. Artifacts saved to {args.output}.")
 
@@ -117,7 +121,15 @@ def run_circuit_gui(args: argparse.Namespace) -> None:
     if args.prompt:
         print("Enter circuit GUI parameters (press Enter to accept defaults).")
         args.model_dir = _prompt_path("Model directory", args.model_dir)
-    launch_circuit_gui(args.model_dir)
+        args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
+    launch_circuit_gui(
+        args.model_dir,
+        args.dataset_dir,
+        min_confidence=args.min_confidence,
+        ambiguity_margin=args.ambiguity_margin,
+        ambiguity_conf_floor=args.ambiguity_conf_floor,
+        ocsvm_cutoff=args.ocsvm_cutoff,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,6 +151,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--save-reconstructions",
         action="store_true",
         help="Save reconstruction images after training.",
+    )
+    train.add_argument(
+        "--use-ocsvm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable One-Class SVM novelty detection.",
+    )
+    train.add_argument("--ocsvm-nu", type=float, default=0.05, help="One-Class SVM nu parameter.")
+    train.add_argument(
+        "--ocsvm-gamma",
+        type=str,
+        default="scale",
+        help="One-Class SVM gamma parameter.",
+    )
+    train.add_argument(
+        "--novelty-recon-quantile",
+        type=float,
+        default=0.99,
+        help="Quantile for reconstruction-error novelty threshold.",
     )
     train.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     train.set_defaults(func=run_train, prompt=True)
@@ -163,6 +194,36 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("./artifacts"),
         help="Model artifacts folder.",
+    )
+    circuit_gui.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=Path("FH_Circuit/Training_Data"),
+        help="Path to the training dataset directory.",
+    )
+    circuit_gui.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.30,
+        help="Minimum confidence to avoid review mode.",
+    )
+    circuit_gui.add_argument(
+        "--ambiguity-margin",
+        type=float,
+        default=0.15,
+        help="Margin between top-2 probabilities for ambiguity mode.",
+    )
+    circuit_gui.add_argument(
+        "--ambiguity-conf-floor",
+        type=float,
+        default=0.70,
+        help="Minimum confidence required to avoid ambiguity mode.",
+    )
+    circuit_gui.add_argument(
+        "--ocsvm-cutoff",
+        type=float,
+        default=0.0,
+        help="OCSVM decision-function cutoff for review mode.",
     )
     circuit_gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     circuit_gui.set_defaults(func=run_circuit_gui, prompt=True)
