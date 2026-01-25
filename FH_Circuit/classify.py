@@ -290,7 +290,18 @@ def classify_sketch_detailed(
             "ocsvm_score": ocsvm_score,
             "ocsvm_pred": ocsvm_pred,
         }
-    if min_confidence <= max_proba < ambiguity_conf_floor and margin <= ambiguity_margin:
+    if max_proba >= ambiguity_conf_floor:
+        top_label = topk[0][0] if topk else None
+        return {
+            "status": "OK",
+            "label": top_label,
+            "confidence": max_proba,
+            "topk": topk,
+            "recon_error": recon_error,
+            "ocsvm_score": ocsvm_score,
+            "ocsvm_pred": ocsvm_pred,
+        }
+    if max_proba >= min_confidence and margin <= ambiguity_margin:
         return {
             "status": "AMBIGUITY",
             "topk": topk,
