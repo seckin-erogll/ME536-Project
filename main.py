@@ -122,7 +122,14 @@ def run_circuit_gui(args: argparse.Namespace) -> None:
         print("Enter circuit GUI parameters (press Enter to accept defaults).")
         args.model_dir = _prompt_path("Model directory", args.model_dir)
         args.dataset_dir = _prompt_path("Dataset directory", args.dataset_dir)
-    launch_circuit_gui(args.model_dir, args.dataset_dir)
+    launch_circuit_gui(
+        args.model_dir,
+        args.dataset_dir,
+        min_confidence=args.min_confidence,
+        ambiguity_margin=args.ambiguity_margin,
+        ambiguity_conf_floor=args.ambiguity_conf_floor,
+        ocsvm_cutoff=args.ocsvm_cutoff,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -193,6 +200,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("FH_Circuit/Training_Data"),
         help="Path to the training dataset directory.",
+    )
+    circuit_gui.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.30,
+        help="Minimum confidence to avoid review mode.",
+    )
+    circuit_gui.add_argument(
+        "--ambiguity-margin",
+        type=float,
+        default=0.15,
+        help="Margin between top-2 probabilities for ambiguity mode.",
+    )
+    circuit_gui.add_argument(
+        "--ambiguity-conf-floor",
+        type=float,
+        default=0.70,
+        help="Minimum confidence required to avoid ambiguity mode.",
+    )
+    circuit_gui.add_argument(
+        "--ocsvm-cutoff",
+        type=float,
+        default=0.0,
+        help="OCSVM decision-function cutoff for review mode.",
     )
     circuit_gui.add_argument("--no-prompt", action="store_false", dest="prompt", help="Disable prompts.")
     circuit_gui.set_defaults(func=run_circuit_gui, prompt=True)

@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-from FH_Circuit.classify import ClassificationResult, classify_sketch_detailed, load_artifacts
+from FH_Circuit.classify import classify_sketch_detailed, load_artifacts
 from FH_Circuit.config import IMAGE_SIZE
 from FH_Circuit.data import ensure_train_val_split
 from FH_Circuit.train import incremental_update_pipeline
@@ -152,7 +152,18 @@ class SymbolCollector(tk.Toplevel):
 
 
 class CircuitSegmentationApp:
-    def __init__(self, root: tk.Tk, model_dir: Path, dataset_dir: Path, required_samples: int = 5) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        model_dir: Path,
+        dataset_dir: Path,
+        required_samples: int = 5,
+        *,
+        min_confidence: float = 0.30,
+        ambiguity_margin: float = 0.15,
+        ambiguity_conf_floor: float = 0.70,
+        ocsvm_cutoff: float = 0.0,
+    ) -> None:
         self.root = root
         self.root.title("Circuit Segmentation + Classification")
 
@@ -162,6 +173,12 @@ class CircuitSegmentationApp:
         self.required_samples = max(1, required_samples)
         self.discarded_dir = self.model_dir / "_discarded"
         self.discarded_dir.mkdir(parents=True, exist_ok=True)
+        self.classifier_params = {
+            "min_confidence": min_confidence,
+            "ambiguity_margin": ambiguity_margin,
+            "ambiguity_conf_floor": ambiguity_conf_floor,
+            "ocsvm_cutoff": ocsvm_cutoff,
+        }
 
         self.canvas_width = 800
         self.canvas_height = 600
@@ -322,7 +339,7 @@ class CircuitSegmentationApp:
 
         boxed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         statuses: list[str] = []
-        saw_novelty = False
+        saw_review = False
         overlay_drawn = False
         min_area = params["min_area"]
         height, width = bin_img.shape[:2]
@@ -356,11 +373,16 @@ class CircuitSegmentationApp:
 
             x, y, w, h = self._expand_bbox(x, y, w, h, 1.10, width, height)
 
-            label, is_novelty, status = self._classify_crop(gray, x, y, w, h)
+            label, status_label, status = self._classify_crop(gray, x, y, w, h)
             statuses.append(status)
-            saw_novelty = saw_novelty or is_novelty
+            saw_review = saw_review or status_label == "REVIEW"
 
-            color = (0, 128, 0) if not is_novelty else (0, 0, 255)
+            if status_label == "OK":
+                color = (0, 128, 0)
+            elif status_label == "AMBIGUITY":
+                color = (0, 165, 255)
+            else:
+                color = (0, 0, 255)
             cv2.rectangle(boxed, (x, y), (x + w, y + h), color, 2)
             overlay_drawn = True
             cv2.putText(
@@ -375,8 +397,8 @@ class CircuitSegmentationApp:
             )
 
         if statuses:
-            if saw_novelty:
-                self.status.set("New object detected. " + " | ".join(statuses))
+            if saw_review:
+                self.status.set("Needs review. " + " | ".join(statuses))
             else:
                 self.status.set(" | ".join(statuses))
         else:
@@ -431,42 +453,32 @@ class CircuitSegmentationApp:
         self.overlay_active = False
         self._show_display_image()
 
-    def _classify_crop(self, gray: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[str, bool, str]:
+    def _classify_crop(self, gray: np.ndarray, x: int, y: int, w: int, h: int) -> tuple[str, str, str]:
         crop = self._prepare_crop(gray, x, y, w, h)
         if crop is None:
-            return "Unknown", False, "Empty crop"
-        result = classify_sketch_detailed(self.artifacts, crop)
+            return "Unknown", "REVIEW", "Empty crop"
+        result = classify_sketch_detailed(self.artifacts, crop, **self.classifier_params)
         handled_label, updated = self._handle_result(crop, result)
-        status_message = result.message
-        if result.status == "ambiguous" and handled_label:
-            if handled_label == "Noise":
-                status_message = "Ambiguity resolved: marked as noise."
-            else:
-                status_message = f"Ambiguity resolved: {handled_label}"
-        if result.novelty_label == "BAD_CROP" and handled_label == "Noise":
-            status_message = "Marked as noise."
         if updated:
             self.artifacts = load_artifacts(self.model_dir)
-            result = classify_sketch_detailed(self.artifacts, crop)
-            handled_label = handled_label or (result.label if result.label else "Unknown")
-            status_message = result.message
-        label = handled_label or (result.label if result.label else self._label_from_status(result.status))
+            result = classify_sketch_detailed(self.artifacts, crop, **self.classifier_params)
+        label = handled_label or result.get("label") or "Unknown"
         metrics = self._format_classification_metrics(result, label)
-        status_message = f"{metrics} | {status_message}"
-        is_novelty = result.novelty_label in {"UNKNOWN", "BAD_CROP"} or label in {"Unknown", "Noise"}
-        return label, is_novelty, status_message
+        status_message = f"{metrics} | {self._format_status_message(result, handled_label)}"
+        return label, result.get("status", "REVIEW"), status_message
 
-    def _handle_result(self, crop: np.ndarray, result: ClassificationResult) -> tuple[str | None, bool]:
-        if result.status == "ambiguous":
+    def _handle_result(self, crop: np.ndarray, result: dict) -> tuple[str | None, bool]:
+        status = result.get("status")
+        if status == "AMBIGUITY":
             return self._handle_ambiguity(crop, result), False
-        if result.novelty_label in {"UNKNOWN", "BAD_CROP"}:
-            return self._handle_novelty_or_noise(crop, result)
+        if status == "REVIEW":
+            return self._handle_review(crop, result)
         return None, False
 
-    def _handle_ambiguity(self, crop: np.ndarray, result: ClassificationResult) -> str | None:
-        top_candidates = result.candidates[:2]
+    def _handle_ambiguity(self, crop: np.ndarray, result: dict) -> str | None:
+        top_candidates = result.get("topk", [])[:3]
         if not top_candidates:
-            top_candidates = [(label, 0.0) for label in self.artifacts.labels[:2]]
+            top_candidates = [(label, 0.0) for label in self.artifacts.labels[:3]]
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Ambiguity detected")
@@ -479,7 +491,7 @@ class CircuitSegmentationApp:
         preview_label.image = preview
         preview_label.grid(row=0, column=0, columnspan=2, padx=12, pady=(12, 6))
 
-        ttk.Label(dialog, text="Select the correct label:").grid(
+        ttk.Label(dialog, text="Ambiguity: choose label (top-3 are close).").grid(
             row=1, column=0, columnspan=2, padx=12, pady=(0, 8)
         )
 
@@ -495,25 +507,75 @@ class CircuitSegmentationApp:
                 row=2 + idx, column=0, columnspan=2, sticky="ew", padx=12, pady=4
             )
 
-        ttk.Button(dialog, text="Noise / Bad crop", command=lambda: choose(None)).grid(
-            row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=(6, 12)
-        )
-
         self.root.wait_window(dialog)
 
         if selection["label"]:
             saved_path = self._save_dataset_sample(selection["label"], crop, hard_example=True)
             self.status.set(f"Saved hard example: {saved_path.name}")
             return selection["label"]
-        discarded_path = self._save_discarded_sample(crop)
-        self.status.set(f"Discarded ambiguous crop: {discarded_path.name}")
-        return "Noise"
+        return None
 
-    def _handle_novelty_or_noise(self, crop: np.ndarray, result: ClassificationResult) -> tuple[str | None, bool]:
-        if result.novelty_label == "BAD_CROP":
-            self._show_noise_dialog(crop, result.message)
+    def _handle_review(self, crop: np.ndarray, result: dict) -> tuple[str | None, bool]:
+        top_candidates = result.get("topk", [])[:3]
+        if not top_candidates:
+            top_candidates = [(label, 0.0) for label in self.artifacts.labels[:3]]
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Needs review")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        preview = self._make_preview_image(crop, size=192)
+        preview_label = ttk.Label(dialog, image=preview)
+        preview_label.image = preview
+        preview_label.grid(row=0, column=0, columnspan=2, padx=12, pady=(12, 6))
+
+        reasons = result.get("reasons", [])
+        reason_text = "/".join(reasons) if reasons else "unknown"
+        conf = result.get("max_proba", 0.0) * 100
+        ttk.Label(
+            dialog,
+            text=f"Needs review (novel/noise). Reasons: {reason_text}. Conf={conf:.1f}%",
+            wraplength=240,
+            justify="center",
+        ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0, 8))
+
+        selection: dict[str, str | None] = {"choice": None}
+
+        def choose(choice: str | None) -> None:
+            selection["choice"] = choice
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Mark as Novel", command=lambda: choose("novel")).grid(
+            row=2, column=0, sticky="ew", padx=12, pady=(0, 6)
+        )
+        ttk.Button(dialog, text="Mark as Noise", command=lambda: choose("noise")).grid(
+            row=2, column=1, sticky="ew", padx=12, pady=(0, 6)
+        )
+
+        for idx, (label_name, prob) in enumerate(top_candidates):
+            text = f"{label_name} ({prob * 100:.1f}%)"
+            ttk.Button(dialog, text=text, command=lambda name=label_name: choose(name)).grid(
+                row=3 + idx, column=0, columnspan=2, sticky="ew", padx=12, pady=4
+            )
+
+        self.root.wait_window(dialog)
+
+        choice = selection["choice"]
+        if choice == "noise":
+            discarded_path = self._save_discarded_sample(crop)
+            self.status.set(f"Discarded noisy crop: {discarded_path.name}")
             return "Noise", False
+        if choice == "novel":
+            return self._handle_new_class(crop)
+        if choice:
+            saved_path = self._save_dataset_sample(choice, crop, hard_example=True)
+            self.status.set(f"Saved hard example: {saved_path.name}")
+            return choice, False
+        return None, False
 
+    def _handle_new_class(self, crop: np.ndarray) -> tuple[str | None, bool]:
         class_name = self._prompt_new_class_name(crop)
         if not class_name:
             return "Unknown", False
@@ -542,16 +604,31 @@ class CircuitSegmentationApp:
         self.status.set(f"Model updated with class '{class_name}'.")
         return class_name, True
 
-    def _format_classification_metrics(self, result: ClassificationResult, label: str) -> str:
-        confidence = result.candidates[0][1] if result.candidates else None
-        confidence_text = f"{confidence * 100:.1f}%" if confidence is not None else "n/a"
-        ocsvm_score = result.ocsvm_score
+    def _format_classification_metrics(self, result: dict, label: str) -> str:
+        max_proba = result.get("confidence", result.get("max_proba"))
+        confidence_text = f"{max_proba * 100:.1f}%" if max_proba is not None else "n/a"
+        ocsvm_score = result.get("ocsvm_score")
         ocsvm_text = f"{ocsvm_score:.4f}" if ocsvm_score is not None else "n/a"
-        recon_text = f"{result.recon_error:.4f}"
-        return (
-            f"{label} ({confidence_text}) | {result.novelty_label}"
-            f" | recon={recon_text} | ocsvm={ocsvm_text}"
-        )
+        recon_error = result.get("recon_error", 0.0)
+        recon_text = f"{recon_error:.4f}"
+        return f"{label} ({confidence_text}) | recon={recon_text} | ocsvm={ocsvm_text}"
+
+    def _format_status_message(self, result: dict, handled_label: str | None) -> str:
+        status = result.get("status")
+        if status == "OK":
+            label = result.get("label") or "Unknown"
+            return f"Detected: {label}"
+        if status == "AMBIGUITY":
+            if handled_label:
+                return f"Ambiguity resolved: {handled_label}"
+            return "Ambiguity: choose label (top-3 are close)."
+        if status == "REVIEW":
+            if handled_label == "Noise":
+                return "Marked as noise."
+            if handled_label:
+                return f"Review resolved: {handled_label}"
+            return "Needs review (novel/noise)."
+        return "Needs review."
 
     def _collect_samples_for_label(self, label: str, initial_total: int) -> None:
         while True:
@@ -713,13 +790,6 @@ class CircuitSegmentationApp:
                 parent=self.root,
             )
         return saved
-
-    def _label_from_status(self, status: str) -> str:
-        if status == "ambiguous":
-            return "Ambiguous"
-        if status in {"novel", "noisy"}:
-            return "Unknown"
-        return "Unknown"
 
     def _prepare_crop(self, gray: np.ndarray, x: int, y: int, w: int, h: int) -> np.ndarray | None:
         x0 = max(0, x)
@@ -889,9 +959,25 @@ class CircuitSegmentationApp:
         self._set_display_from_np(array_bgr)
 
 
-def launch_circuit_gui(model_dir: Path, dataset_dir: Path) -> None:
+def launch_circuit_gui(
+    model_dir: Path,
+    dataset_dir: Path,
+    *,
+    min_confidence: float = 0.30,
+    ambiguity_margin: float = 0.15,
+    ambiguity_conf_floor: float = 0.70,
+    ocsvm_cutoff: float = 0.0,
+) -> None:
     root = tk.Tk()
-    app = CircuitSegmentationApp(root, model_dir=model_dir, dataset_dir=dataset_dir)
+    app = CircuitSegmentationApp(
+        root,
+        model_dir=model_dir,
+        dataset_dir=dataset_dir,
+        min_confidence=min_confidence,
+        ambiguity_margin=ambiguity_margin,
+        ambiguity_conf_floor=ambiguity_conf_floor,
+        ocsvm_cutoff=ocsvm_cutoff,
+    )
     root.mainloop()
 
 
