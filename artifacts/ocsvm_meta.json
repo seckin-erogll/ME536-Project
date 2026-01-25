@@ -1,0 +1,10 @@
+{
+  "nu": 0.05,
+  "gamma": "scale",
+  "kernel": "rbf",
+  "latent_dim": 32,
+  "train_samples": 7074,
+  "augmentation_passes": 3,
+  "recon_error_quantile": 0.99,
+  "recon_error_threshold": 0.09097307212650764
+}
