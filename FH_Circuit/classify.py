@@ -217,9 +217,9 @@ def classify_sketch_detailed(
     artifacts: StageArtifacts,
     sketch: np.ndarray,
     recon_thresh: float = ERROR_THRESHOLD,
-    min_confidence: float = 0.65,
-    ambiguity_margin: float = 0.12,
-    ambiguity_conf_floor: float = 0.75,
+    min_confidence: float = 0.30,
+    ambiguity_margin: float = 0.15,
+    ambiguity_conf_floor: float = 0.70,
     ocsvm_cutoff: float = 0.0,
     noise_threshold: float = MSE_NOISE_THRESHOLD,
 ) -> dict:
@@ -290,7 +290,7 @@ def classify_sketch_detailed(
             "ocsvm_score": ocsvm_score,
             "ocsvm_pred": ocsvm_pred,
         }
-    if margin < ambiguity_margin or max_proba < ambiguity_conf_floor:
+    if min_confidence <= max_proba < ambiguity_conf_floor and margin <= ambiguity_margin:
         return {
             "status": "AMBIGUITY",
             "topk": topk,

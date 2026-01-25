@@ -204,19 +204,19 @@ def build_parser() -> argparse.ArgumentParser:
     circuit_gui.add_argument(
         "--min-confidence",
         type=float,
-        default=0.65,
+        default=0.30,
         help="Minimum confidence to avoid review mode.",
     )
     circuit_gui.add_argument(
         "--ambiguity-margin",
         type=float,
-        default=0.12,
+        default=0.15,
         help="Margin between top-2 probabilities for ambiguity mode.",
     )
     circuit_gui.add_argument(
         "--ambiguity-conf-floor",
         type=float,
-        default=0.75,
+        default=0.70,
         help="Minimum confidence required to avoid ambiguity mode.",
     )
     circuit_gui.add_argument(

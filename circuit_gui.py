@@ -159,9 +159,9 @@ class CircuitSegmentationApp:
         dataset_dir: Path,
         required_samples: int = 5,
         *,
-        min_confidence: float = 0.65,
-        ambiguity_margin: float = 0.12,
-        ambiguity_conf_floor: float = 0.75,
+        min_confidence: float = 0.30,
+        ambiguity_margin: float = 0.15,
+        ambiguity_conf_floor: float = 0.70,
         ocsvm_cutoff: float = 0.0,
     ) -> None:
         self.root = root
@@ -963,9 +963,9 @@ def launch_circuit_gui(
     model_dir: Path,
     dataset_dir: Path,
     *,
-    min_confidence: float = 0.65,
-    ambiguity_margin: float = 0.12,
-    ambiguity_conf_floor: float = 0.75,
+    min_confidence: float = 0.30,
+    ambiguity_margin: float = 0.15,
+    ambiguity_conf_floor: float = 0.70,
     ocsvm_cutoff: float = 0.0,
 ) -> None:
     root = tk.Tk()
