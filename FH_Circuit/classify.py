@@ -7,7 +7,7 @@ import json
 import pickle
 import sys
 from pathlib import Path
-from typing import List, Literal
+from typing import List
 
 import numpy as np
 import torch
@@ -18,13 +18,13 @@ if __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from FH_Circuit.config import (
-    AMBIGUITY_THRESHOLD,
     ENABLE_TTA_ROTATIONS,
     ERROR_THRESHOLD,
+    MIN_CONFIDENCE,
     MSE_NOISE_THRESHOLD,
     MSE_NOISE_THRESHOLD_LOOSE,
 )
-from FH_Circuit.latent_density import LatentDensityArtifacts, distance_to_label, nearest_class
+from FH_Circuit.latent_density import LatentDensityArtifacts, nearest_class
 from FH_Circuit.model import ConvAutoencoder, SupervisedAutoencoder
 from FH_Circuit.preprocess import preprocess
 
@@ -36,26 +36,10 @@ class StageArtifacts:
     labels: List[str]
     latent_scaler: StandardScaler
     latent_density: LatentDensityArtifacts | None
+    latent_protos: dict | None
     ocsvm: OneClassSVM | None
     ocsvm_meta: dict | None
     recon_error_threshold: float | None
-
-
-@dataclasses.dataclass(frozen=True)
-class ClassificationResult:
-    status: Literal["ok", "ambiguous", "novel", "noisy"]
-    novelty_label: Literal["KNOWN", "UNKNOWN", "BAD_CROP"]
-    label: str | None
-    candidates: list[tuple[str, float]]
-    recon_error: float
-    recon_threshold: float | None
-    ocsvm_score: float | None
-    ocsvm_pred: int | None
-    best_angle_deg: int | None
-    nearest_label: str | None
-    nearest_distance: float | None
-    nearest_threshold: float | None
-    message: str
 
 
 def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
@@ -94,6 +78,11 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
     if latent_density_path.exists():
         with latent_density_path.open("rb") as file:
             latent_density = pickle.load(file)
+    latent_protos_path = model_dir / "latent_protos.pkl"
+    latent_protos = None
+    if latent_protos_path.exists():
+        with latent_protos_path.open("rb") as file:
+            latent_protos = pickle.load(file)
     ocsvm_path = model_dir / "ocsvm.pkl"
     ocsvm_meta_path = model_dir / "ocsvm_meta.json"
     ocsvm = None
@@ -119,6 +108,7 @@ def _load_stage_artifacts(model_dir: Path) -> StageArtifacts:
         labels=labels,
         latent_scaler=latent_scaler,
         latent_density=latent_density,
+        latent_protos=latent_protos,
         ocsvm=ocsvm,
         ocsvm_meta=ocsvm_meta,
         recon_error_threshold=recon_error_threshold,
@@ -147,6 +137,7 @@ def _log_artifacts(model_dir: Path, artifacts: StageArtifacts) -> None:
         "classifier.pkl": model_dir / "classifier.pkl",
         "latent_scaler.pkl": model_dir / "latent_scaler.pkl",
         "latent_density.pkl": model_dir / "latent_density.pkl",
+        "latent_protos.pkl": model_dir / "latent_protos.pkl",
         "ocsvm.pkl": model_dir / "ocsvm.pkl",
         "ocsvm_meta.json": model_dir / "ocsvm_meta.json",
     }
@@ -157,7 +148,13 @@ def _log_artifacts(model_dir: Path, artifacts: StageArtifacts) -> None:
     print(f"Artifacts ({model_dir}): {status} | ocsvm={ocsvm_state}")
 
 
-def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) -> tuple[list[tuple[str, float]], float]:
+def _compute_candidates(
+    stage: StageArtifacts, reduced: np.ndarray, k: int = 3
+) -> tuple[list[tuple[str, float]], float, float, float]:
+    if not hasattr(stage.classifier, "predict_proba"):
+        raise ValueError(
+            "Classifier missing predict_proba; ensure SVC was trained with probability=True."
+        )
     probabilities = stage.classifier.predict_proba(reduced)[0]
     sorted_indices = np.argsort(probabilities)[::-1]
     top_indices = sorted_indices[:k]
@@ -169,7 +166,7 @@ def _compute_candidates(stage: StageArtifacts, reduced: np.ndarray, k: int = 2) 
     top_score = float(probabilities[int(sorted_indices[0])])
     second_score = float(probabilities[int(sorted_indices[1])]) if len(sorted_indices) > 1 else 0.0
     margin = top_score - second_score
-    return candidates, margin
+    return candidates, margin, top_score, second_score
 
 
 def _rotated_variants(processed: np.ndarray) -> list[tuple[int, np.ndarray]]:
@@ -231,182 +228,137 @@ def _best_rotation_by_density(artifacts: StageArtifacts, processed: np.ndarray) 
 def classify_sketch_detailed(
     artifacts: StageArtifacts,
     sketch: np.ndarray,
-    error_threshold: float = ERROR_THRESHOLD,
-    ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
+    recon_thresh: float = ERROR_THRESHOLD,
+    *,
+    min_confidence: float = MIN_CONFIDENCE,
+    ambiguity_margin: float = 0.12,
+    ambiguity_conf_floor: float = 0.75,
+    ocsvm_cutoff: float = 0.0,
     noise_threshold: float = MSE_NOISE_THRESHOLD,
-) -> ClassificationResult:
+) -> dict:
     try:
         processed = preprocess(sketch)
     except ValueError as exc:
-        message = f"Novelty detected: sketch too noisy. ({exc})"
-        return ClassificationResult(
-            status="noisy",
-            novelty_label="BAD_CROP",
-            label=None,
-            candidates=[],
-            recon_error=float("inf"),
-            recon_threshold=artifacts.recon_error_threshold or error_threshold,
-            ocsvm_score=None,
-            ocsvm_pred=None,
-            best_angle_deg=None,
-            nearest_label=None,
-            nearest_distance=None,
-            nearest_threshold=None,
-            message=message,
-        )
+        return {
+            "status": "REVIEW",
+            "reasons": ["preprocess_error"],
+            "topk": [],
+            "max_proba": 0.0,
+            "margin": 0.0,
+            "recon_error": float("inf"),
+            "recon_thresh": artifacts.recon_error_threshold or recon_thresh,
+            "ocsvm_score": None,
+            "ocsvm_pred": None,
+            "message": f"Novelty detected: sketch too noisy. ({exc})",
+        }
     artifacts.model.eval()
     density = artifacts.latent_density
-    nearest_label: str | None = None
-    nearest_distance: float | None = None
-    nearest_threshold: float | None = None
     best_angle_deg: int | None = 0
     if density is not None and ENABLE_TTA_ROTATIONS:
         best_rotation = _best_rotation_by_density(artifacts, processed)
         if best_rotation is None:
-            message = "Novelty detected: sketch too noisy."
-            return ClassificationResult(
-                status="noisy",
-                novelty_label="BAD_CROP",
-                label=None,
-                candidates=[],
-                recon_error=float("inf"),
-                recon_threshold=artifacts.recon_error_threshold or error_threshold,
-                ocsvm_score=None,
-                ocsvm_pred=None,
-                best_angle_deg=None,
-                nearest_label=None,
-                nearest_distance=None,
-                nearest_threshold=None,
-                message=message,
-            )
+            return {
+                "status": "REVIEW",
+                "reasons": ["noise"],
+                "topk": [],
+                "max_proba": 0.0,
+                "margin": 0.0,
+                "recon_error": float("inf"),
+                "recon_thresh": artifacts.recon_error_threshold or recon_thresh,
+                "ocsvm_score": None,
+                "ocsvm_pred": None,
+                "message": "Novelty detected: sketch too noisy.",
+            }
         recon_error = float(best_rotation["recon_error"])
         normalized_latent = best_rotation["normalized_latent"]
         best_angle_deg = int(best_rotation["angle"])
-        nearest_label = best_rotation["nearest_label"]
-        nearest_distance = float(best_rotation["dist"])
-        nearest_threshold = float(best_rotation["threshold"])
     else:
         recon_error, normalized_latent = _forward_latent(artifacts, processed)
-        if density is not None:
-            nearest_label, nearest_distance, nearest_threshold = nearest_class(normalized_latent[0], density)
     ocsvm_score, ocsvm_pred = _ocsvm_decision(artifacts, normalized_latent)
-    recon_threshold = artifacts.recon_error_threshold or error_threshold
-    if recon_error > noise_threshold:
-        message = "Novelty detected: sketch too noisy."
-        return ClassificationResult(
-            status="noisy",
-            novelty_label="BAD_CROP",
-            label=None,
-            candidates=[],
-            recon_error=recon_error,
-            recon_threshold=recon_threshold,
-            ocsvm_score=ocsvm_score,
-            ocsvm_pred=ocsvm_pred,
-            best_angle_deg=best_angle_deg,
-            nearest_label=nearest_label,
-            nearest_distance=nearest_distance,
-            nearest_threshold=nearest_threshold,
-            message=message,
-        )
-    if ocsvm_pred is not None and ocsvm_pred < 0:
-        if recon_error > recon_threshold:
-            novelty_label = "UNKNOWN"
-            message = "Novelty detected: unknown component."
-            status = "novel"
-        else:
-            novelty_label = "BAD_CROP"
-            message = "Novelty detected: bad crop."
-            status = "noisy"
-        return ClassificationResult(
-            status=status,
-            novelty_label=novelty_label,
-            label=None,
-            candidates=[],
-            recon_error=recon_error,
-            recon_threshold=recon_threshold,
-            ocsvm_score=ocsvm_score,
-            ocsvm_pred=ocsvm_pred,
-            best_angle_deg=best_angle_deg,
-            nearest_label=nearest_label,
-            nearest_distance=nearest_distance,
-            nearest_threshold=nearest_threshold,
-            message=message,
-        )
-    if ocsvm_pred is None and recon_error > error_threshold:
-        message = "Novelty detected: unknown component."
-        return ClassificationResult(
-            status="novel",
-            novelty_label="UNKNOWN",
-            label=None,
-            candidates=[],
-            recon_error=recon_error,
-            recon_threshold=recon_threshold,
-            ocsvm_score=ocsvm_score,
-            ocsvm_pred=ocsvm_pred,
-            best_angle_deg=best_angle_deg,
-            nearest_label=nearest_label,
-            nearest_distance=nearest_distance,
-            nearest_threshold=nearest_threshold,
-            message=message,
-        )
-    candidates, margin = _compute_candidates(artifacts, normalized_latent, k=2)
-    label = candidates[0][0] if candidates else None
-    ambiguous = margin < ambiguity_threshold or not label
-    if density is not None and label:
-        predicted_distance = distance_to_label(normalized_latent[0], label, density)
-        predicted_threshold = density.class_stats[label].threshold
-        nearest_label = label
-        nearest_distance = predicted_distance
-        nearest_threshold = predicted_threshold
-    if ambiguous:
-        message = "Ambiguity detected: ask user to clarify between closest symbols."
-        return ClassificationResult(
-            status="ambiguous",
-            novelty_label="KNOWN",
-            label=None,
-            candidates=candidates,
-            recon_error=recon_error,
-            recon_threshold=recon_threshold,
-            ocsvm_score=ocsvm_score,
-            ocsvm_pred=ocsvm_pred,
-            best_angle_deg=best_angle_deg,
-            nearest_label=nearest_label,
-            nearest_distance=nearest_distance,
-            nearest_threshold=nearest_threshold,
-            message=message,
-        )
-    message = f"Detected: {label}"
-    return ClassificationResult(
-        status="ok",
-        novelty_label="KNOWN",
-        label=label,
-        candidates=candidates,
-        recon_error=recon_error,
-        recon_threshold=recon_threshold,
-        ocsvm_score=ocsvm_score,
-        ocsvm_pred=ocsvm_pred,
-        best_angle_deg=best_angle_deg,
-        nearest_label=nearest_label,
-        nearest_distance=nearest_distance,
-        nearest_threshold=nearest_threshold,
-        message=message,
+    recon_threshold = artifacts.recon_error_threshold or recon_thresh
+    candidates, margin, max_proba, second_proba = _compute_candidates(
+        artifacts, normalized_latent, k=3
     )
+    reasons: list[str] = []
+    if recon_error > noise_threshold:
+        reasons.append("noise")
+    if recon_error > recon_threshold:
+        reasons.append("recon_error")
+    if ocsvm_pred is not None and (ocsvm_pred == -1 or ocsvm_score is None):
+        reasons.append("ocsvm")
+    if ocsvm_score is not None and ocsvm_score < ocsvm_cutoff:
+        reasons.append("ocsvm")
+    if max_proba < min_confidence:
+        reasons.append("low_confidence")
+    if reasons:
+        return {
+            "status": "REVIEW",
+            "reasons": reasons,
+            "topk": candidates,
+            "max_proba": max_proba,
+            "margin": max_proba - second_proba,
+            "recon_error": recon_error,
+            "recon_thresh": recon_threshold,
+            "ocsvm_score": ocsvm_score,
+            "ocsvm_pred": ocsvm_pred,
+        }
+    if (max_proba - second_proba) < ambiguity_margin or max_proba < ambiguity_conf_floor:
+        return {
+            "status": "AMBIGUITY",
+            "topk": candidates,
+            "max_proba": max_proba,
+            "margin": max_proba - second_proba,
+            "recon_error": recon_error,
+            "recon_thresh": recon_threshold,
+            "ocsvm_score": ocsvm_score,
+            "ocsvm_pred": ocsvm_pred,
+        }
+    label = candidates[0][0] if candidates else None
+    return {
+        "status": "OK",
+        "label": label,
+        "confidence": max_proba,
+        "topk": candidates,
+        "max_proba": max_proba,
+        "margin": max_proba - second_proba,
+        "recon_error": recon_error,
+        "recon_thresh": recon_threshold,
+        "ocsvm_score": ocsvm_score,
+        "ocsvm_pred": ocsvm_pred,
+        "best_angle_deg": best_angle_deg,
+    }
 
 
 def classify_sketch(
     artifacts: StageArtifacts,
     sketch: np.ndarray,
-    error_threshold: float = ERROR_THRESHOLD,
-    ambiguity_threshold: float = AMBIGUITY_THRESHOLD,
+    recon_thresh: float = ERROR_THRESHOLD,
+    *,
+    min_confidence: float = MIN_CONFIDENCE,
+    ambiguity_margin: float = 0.12,
+    ambiguity_conf_floor: float = 0.75,
+    ocsvm_cutoff: float = 0.0,
     noise_threshold: float = MSE_NOISE_THRESHOLD,
 ) -> str:
     result = classify_sketch_detailed(
         artifacts,
         sketch,
-        error_threshold=error_threshold,
-        ambiguity_threshold=ambiguity_threshold,
+        recon_thresh=recon_thresh,
+        min_confidence=min_confidence,
+        ambiguity_margin=ambiguity_margin,
+        ambiguity_conf_floor=ambiguity_conf_floor,
+        ocsvm_cutoff=ocsvm_cutoff,
         noise_threshold=noise_threshold,
     )
-    if result.status == "ok" and result.label:
-        return f"Detected: {result.label}"
-    return result.message
+    status = result.get("status")
+    if status == "OK" and result.get("label"):
+        return f"Detected: {result['label']}"
+    if status == "AMBIGUITY":
+        return "Ambiguity detected: ask user to clarify between closest symbols."
+    if status == "REVIEW":
+        recon_error = float(result.get("recon_error", 0.0))
+        recon_threshold = float(result.get("recon_thresh", recon_thresh))
+        if recon_error > recon_threshold:
+            return "Novelty detected: unknown component."
+        return "Novelty detected: bad crop."
+    return "Novelty detected: unknown component."
