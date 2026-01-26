@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import tkinter as tk
 from pathlib import Path
@@ -11,6 +12,11 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from FH_Circuit.classify import classify_sketch, load_artifacts
+
+
+def propose_bboxes(_image: Image.Image) -> list[tuple[int, int, int, int]]:
+    """Return bounding boxes for the given image in original image coordinates."""
+    raise NotImplementedError("Provide a detector that returns bounding boxes.")
 
 
 class SketchGUI:
@@ -37,9 +43,16 @@ class SketchGUI:
         ttk.Button(self.root, text="Classify", command=self.on_classify).grid(row=2, column=0, padx=5, pady=5)
         ttk.Button(self.root, text="Clear", command=self.on_clear).grid(row=2, column=1, padx=5, pady=5)
         ttk.Button(self.root, text="Quit", command=self.root.destroy).grid(row=2, column=2, padx=5, pady=5)
+        ttk.Button(self.root, text="Detect", command=self.on_detect).grid(row=3, column=0, padx=5, pady=5)
 
         self.image = Image.new("L", (canvas_size, canvas_size), color=0)
         self.draw = ImageDraw.Draw(self.image)
+        self.display_image: Image.Image | None = None
+        self.tk_image: ImageTk.PhotoImage | None = None
+        self.image_scale = 1.0
+        self.image_offset_x = 0.0
+        self.image_offset_y = 0.0
+        self.bboxes: list[tuple[int, int, int, int]] = []
         self.last_x = None
         self.last_y = None
         self.example_photo = None
@@ -48,7 +61,9 @@ class SketchGUI:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Configure>", self.on_canvas_resize)
         self._show_random_example(None)
+        self.set_image(self.image)
 
     def on_press(self, event: tk.Event) -> None:
         self.last_x = event.x
@@ -57,10 +72,10 @@ class SketchGUI:
     def on_drag(self, event: tk.Event) -> None:
         if self.last_x is None or self.last_y is None:
             return
-        self.canvas.create_line(self.last_x, self.last_y, event.x, event.y, fill="white", width=6)
         self.draw.line((self.last_x, self.last_y, event.x, event.y), fill=255, width=6)
         self.last_x = event.x
         self.last_y = event.y
+        self.set_image(self.image)
 
     def on_release(self, _event: tk.Event) -> None:
         self.last_x = None
@@ -70,6 +85,8 @@ class SketchGUI:
         self.canvas.delete("all")
         self.image = Image.new("L", (self.canvas_size, self.canvas_size), color=0)
         self.draw = ImageDraw.Draw(self.image)
+        self.bboxes = []
+        self.set_image(self.image)
         self.status.set("Canvas cleared.")
 
     def on_classify(self) -> None:
@@ -81,6 +98,76 @@ class SketchGUI:
             result = str(exc)
         self.status.set(result)
         self._update_example_from_result(result)
+
+    def on_detect(self) -> None:
+        if self.display_image is None:
+            self.status.set("No image loaded for detection.")
+            return
+        try:
+            bboxes = propose_bboxes(self.display_image)
+        except NotImplementedError:
+            self.status.set("No detector configured.")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.status.set(f"Detection failed: {exc}")
+            return
+        self.draw_bboxes(bboxes)
+        print(json.dumps({"bboxes": bboxes}, indent=2))
+        self.status.set(f"Detected {len(bboxes)} boxes.")
+
+    def on_canvas_resize(self, _event: tk.Event) -> None:
+        if self.display_image is None:
+            return
+        self._fit_image_to_canvas()
+        self.draw_bboxes(self.bboxes)
+
+    def set_image(self, pil_image: Image.Image) -> None:
+        self.display_image = pil_image
+        self._fit_image_to_canvas()
+        if self.bboxes:
+            self.draw_bboxes(self.bboxes)
+
+    def _fit_image_to_canvas(self) -> None:
+        if self.display_image is None:
+            return
+        canvas_w = max(self.canvas.winfo_width(), 1)
+        canvas_h = max(self.canvas.winfo_height(), 1)
+        img_w, img_h = self.display_image.size
+        scale = min(canvas_w / img_w, canvas_h / img_h)
+        disp_w = max(int(round(img_w * scale)), 1)
+        disp_h = max(int(round(img_h * scale)), 1)
+        offset_x = (canvas_w - disp_w) / 2
+        offset_y = (canvas_h - disp_h) / 2
+        resized = self.display_image.resize((disp_w, disp_h), resample=Image.BILINEAR)
+        self.tk_image = ImageTk.PhotoImage(resized)
+        self.canvas.delete("img")
+        self.canvas.create_image(offset_x, offset_y, image=self.tk_image, anchor="nw", tags=("img",))
+        self.image_scale = scale
+        self.image_offset_x = offset_x
+        self.image_offset_y = offset_y
+
+    def draw_bboxes(self, bboxes: list[tuple[int, int, int, int]]) -> None:
+        self.bboxes = list(bboxes)
+        self.clear_bboxes()
+        if self.display_image is None:
+            return
+        for x1, y1, x2, y2 in self.bboxes:
+            canvas_x1 = self.image_offset_x + self.image_scale * x1
+            canvas_y1 = self.image_offset_y + self.image_scale * y1
+            canvas_x2 = self.image_offset_x + self.image_scale * x2
+            canvas_y2 = self.image_offset_y + self.image_scale * y2
+            self.canvas.create_rectangle(
+                canvas_x1,
+                canvas_y1,
+                canvas_x2,
+                canvas_y2,
+                outline="red",
+                width=2,
+                tags=("bbox",),
+            )
+
+    def clear_bboxes(self) -> None:
+        self.canvas.delete("bbox")
 
     def run(self) -> None:
         self.root.mainloop()
